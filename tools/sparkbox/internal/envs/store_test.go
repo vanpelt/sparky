@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/secrets"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
 func openAt(t *testing.T, path string) *Store {
@@ -734,5 +735,107 @@ func TestAdoptingNothingStoresNoRecord(t *testing.T) {
 		if err := s.Delete("alice", "web"); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// A host that has been building environments since before the runner column
+// existed must read them back as "no VMM requirement" — the only value that
+// keeps them placeable on exactly the nodes they were placeable on yesterday.
+func TestARunnerColumnIsAddedToAnOlderDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sparkbox.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE environments (
+			id          TEXT PRIMARY KEY,
+			owner       TEXT NOT NULL,
+			name        TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			setup_sh    TEXT NOT NULL DEFAULT '',
+			setup_from  TEXT NOT NULL DEFAULT '',
+			build_state TEXT NOT NULL DEFAULT 'draft',
+			build_box   TEXT NOT NULL DEFAULT '',
+			build_error TEXT NOT NULL DEFAULT '',
+			built_at    TIMESTAMP,
+			created_at  TIMESTAMP NOT NULL,
+			updated_at  TIMESTAMP NOT NULL,
+			UNIQUE (owner, name)
+		);
+		INSERT INTO environments (id, owner, name, created_at, updated_at)
+		VALUES ('deadbeef', 'alice', 'web', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`); err != nil {
+		t.Fatalf("seed the old schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	s := openAt(t, path)
+	got, err := s.Get("alice", "web")
+	must(t, err)
+	if got.Runner != vmm.RunnerAny {
+		t.Errorf("runner = %q on a migrated row, want no requirement", got.Runner)
+	}
+	must(t, s.SetRunner("alice", "web", vmm.RunnerQEMU))
+	got, err = s.Get("alice", "web")
+	must(t, err)
+	if got.Runner != vmm.RunnerQEMU {
+		t.Errorf("runner = %q after a write to a migrated row", got.Runner)
+	}
+}
+
+func TestSetRunnerRoundTripsAndClears(t *testing.T) {
+	s := openTest(t)
+	mustPut(t, s, "alice", "web", "")
+
+	got, err := s.Get("alice", "web")
+	must(t, err)
+	if got.Runner != vmm.RunnerAny {
+		t.Fatalf("a new environment requires %q, want nothing", got.Runner)
+	}
+
+	must(t, s.SetRunner("alice", "web", vmm.RunnerFirecracker))
+	got, err = s.Get("alice", "web")
+	must(t, err)
+	if got.Runner != vmm.RunnerFirecracker {
+		t.Fatalf("runner = %q, want firecracker", got.Runner)
+	}
+
+	// Clearing is how an owner goes back to "place me anywhere", so the empty
+	// value has to be writable and not just the initial state.
+	must(t, s.SetRunner("alice", "web", vmm.RunnerAny))
+	got, err = s.Get("alice", "web")
+	must(t, err)
+	if got.Runner != vmm.RunnerAny {
+		t.Fatalf("runner = %q after clearing, want nothing", got.Runner)
+	}
+}
+
+// An environment may not require the mock driver, and the refusal has to come
+// from the store as well as the command surface: SetRunner is reachable from
+// REST and the console, not only from `ctl env`.
+func TestSetRunnerRefusesMockAndUnknownRunners(t *testing.T) {
+	s := openTest(t)
+	mustPut(t, s, "alice", "web", "")
+	for _, bad := range []vmm.Runner{vmm.RunnerMock, "cloud-hypervisor", "QEMU"} {
+		if err := s.SetRunner("alice", "web", bad); err == nil {
+			t.Errorf("SetRunner(%q) was accepted", bad)
+		}
+	}
+	got, err := s.Get("alice", "web")
+	must(t, err)
+	if got.Runner != vmm.RunnerAny {
+		t.Errorf("a refused write still changed the row to %q", got.Runner)
+	}
+}
+
+// A missing row is an error here, unlike the best-effort build writers: the
+// caller is changing where a named environment runs, and silence would read to
+// them as success.
+func TestSetRunnerOnAMissingEnvironmentIsAnError(t *testing.T) {
+	s := openTest(t)
+	if err := s.SetRunner("alice", "nope", vmm.RunnerQEMU); !errors.Is(err, ErrNoSuchEnvironment) {
+		t.Errorf("SetRunner on a missing environment = %v, want ErrNoSuchEnvironment", err)
 	}
 }

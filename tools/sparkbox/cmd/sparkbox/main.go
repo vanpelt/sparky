@@ -551,9 +551,15 @@ func serve(args []string) error {
 	}
 	defer envStore.Close()
 
+	// See node.go for why the runner name is parsed rather than switched on
+	// directly: it is advertised, and a bad one is silent.
+	runner, err := vmm.ParseRunner(*driverName)
+	if err != nil {
+		return err
+	}
 	var driver vmm.Driver
-	switch *driverName {
-	case "mock":
+	switch runner {
+	case vmm.RunnerMock:
 		// Deliberately does NOT claim the state dir. The mock holds no tenant
 		// disk worth protecting — it keeps a workdir, not a rootfs — so making
 		// a dev box refuse to go back to a real driver would cost more than it
@@ -561,7 +567,7 @@ func serve(args []string) error {
 		md := mock.New(*vmStateDir, hostKey)
 		md.LoginUser = *defaultLogin
 		driver = md
-	case "firecracker":
+	case vmm.RunnerFirecracker:
 		if err := vmm.ClaimStateDir(*vmStateDir, *driverName, *allowVMMChange); err != nil {
 			return err
 		}
@@ -573,7 +579,7 @@ func serve(args []string) error {
 		if err != nil {
 			return err
 		}
-	case "qemu":
+	case vmm.RunnerQEMU:
 		if err := qemuRefusesJailerFlags(*jailerBin, *chrootJailer); err != nil {
 			return err
 		}
