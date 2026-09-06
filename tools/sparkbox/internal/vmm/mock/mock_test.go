@@ -15,15 +15,6 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
-// Compile-time capability checks: the mock must offer everything the manager
-// type-asserts for, or the mock-driven manager tests silently skip paths.
-var (
-	_ vmm.Renamer          = (*Driver)(nil)
-	_ vmm.Rebooter         = (*Driver)(nil)
-	_ vmm.CPUStatser       = (*Driver)(nil)
-	_ vmm.TemplateReporter = (*Driver)(nil)
-)
-
 // newTestDriver returns a mock driver in a temp state dir plus an
 // authorized_keys line to hand Create as the gateway key.
 func newTestDriver(t *testing.T) (*Driver, string) {

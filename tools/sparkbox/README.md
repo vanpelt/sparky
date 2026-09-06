@@ -811,6 +811,43 @@ installations. Firecracker requires reflinks for both template clones and
 snapshot staging, so the image and VM-state directories must be on the same
 reflink-capable filesystem.
 
+### A second VMM backend
+
+`internal/vmm` defines a five-method `Driver` plus ten optional capability
+interfaces, and until now had exactly one real implementation. It now has two:
+Firecracker and **QEMU** (`internal/vmm/qemu`). The second one exists to prove
+the abstraction rather than to replace the first — Firecracker remains the
+default — and it earns its keep because QEMU disagrees with Firecracker on every
+axis the interface touches: QMP instead of a REST socket, one migration file
+instead of a `mem`/`state` pair, and a balloon whose units run the other way.
+[`docs/vmm-choice.md`](docs/vmm-choice.md) is the argument for doing this at all,
+and [`docs/qemu-spike.md`](docs/qemu-spike.md) records what was measured on
+hardware before the driver was written.
+
+Judging a driver needs a suite that boots real guests, which is what
+[`docs/vmm-parity-harness.md`](docs/vmm-parity-harness.md) describes:
+nineteen cases in `internal/vmm/vmmtest`, parameterised by driver, run against
+live microVMs. `hack/parity/run-on-mac.sh` runs it on the Mac dev box and
+`hack/parity/run-on-cks.sh` in a throwaway Pod on the CKS node. It found a
+product bug on its first run and two capability implementations that lift from
+Firecracker to QEMU *silently wrongly*, neither of which the pre-existing 1,300
+lines of driver tests could see, because none of them ever booted a guest.
+
+Nested virtualization works on the Firecracker we already ship. Measured on the
+CKS node on 2026-09-04: the node has `kvm_intel.nested=Y`, every sandbox already
+carries the VMX bit in its CPUID, and a guest kernel built with
+`CONFIG_KVM_INTEL` boots an inner microVM. What does **not** work is pausing
+one — Firecracker keeps no nested state in a snapshot, returns HTTP 204 anyway,
+and the restored sandbox's kernel hits `BUG at arch/x86/kvm/x86.c:511`. Since
+scale-to-zero pauses sandboxes automatically, that is the real gap, and it is
+why no `CONFIG_KVM` guest kernel should ship until a per-sandbox gate exists.
+`hack/probe-nested-virt.sh` is the host preflight — CPU flags, `/dev/kvm`, the
+KVM module's `nested` and `ept`/`npt` parameters, what
+`KVM_GET_SUPPORTED_CPUID` actually offers a guest, Landlock, and the three 2026
+shadow-MMU escapes a nested-enabled node must be patched against. Run it rather
+than `grep vmx /proc/cpuinfo`, which gives a false negative here and cost the
+original spike a revision.
+
 The default base image is **self-built** from [`images/Dockerfile`](images/Dockerfile)
 (a lean Ubuntu 24.04 + Go/Python·uv/Node, Kind/kubectl, direnv, headless Chrome
 and the agent-browser CLI, ~4GB — replacing the

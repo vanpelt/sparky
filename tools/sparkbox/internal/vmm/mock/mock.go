@@ -28,6 +28,12 @@ import (
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
 )
 
+// Every optional capability in vmm, asserted at compile time. The mock must
+// offer all of them or the mock-driven manager tests silently skip the paths
+// behind the ones it lost — the same failure as the firecracker driver losing
+// one, arriving as a green test run instead of a degraded fleet.
+var _ vmm.FullDriver = (*Driver)(nil)
+
 type fakeVM struct {
 	name          string
 	workdir       string

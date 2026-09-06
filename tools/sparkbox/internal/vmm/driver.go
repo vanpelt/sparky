@@ -119,6 +119,13 @@ type DiskReporter interface {
 	// DiskUsageMB is the durable storage used by the sandbox's root filesystem,
 	// excluding representation details such as shared/sparse host extents and
 	// any regenerable memory snapshot.
+	//
+	// Freshness is NOT part of this contract, and the firecracker driver does
+	// not deliver it: it reads the ext4 superblock's free-block count, which
+	// Linux does not write back while the filesystem is mounted, so a running
+	// sandbox reports the figure its template had. Measured by the parity
+	// harness — see docs/vmm-parity-harness.md, and vmmtest.Traits.LiveDiskUsage
+	// for the trait a driver sets when it does track a live guest.
 	DiskUsageMB(ctx context.Context, name string) (int64, error)
 	// DiskCapacityMB is the guest's hard disk ceiling — the size of the rootfs
 	// filesystem, which it cannot grow past. 0 when unknown.
@@ -226,4 +233,35 @@ type Ballooner interface {
 	SetBalloonTarget(ctx context.Context, name string, targetMiB int64) error
 	// BalloonStats reports the guest's current memory use, when available.
 	BalloonStats(ctx context.Context, name string) (BalloonStats, error)
+}
+
+// FullDriver is every capability this package defines: the required Driver plus
+// all ten optional interfaces.
+//
+// Nothing accepts a FullDriver as a parameter, and nothing should. host.Manager
+// reaches each capability by type assertion on purpose, so a driver is free to
+// implement a subset and the manager degrades around what is missing. This
+// interface exists for the opposite case — a driver that means to offer all of
+// them — so it can say so in one line:
+//
+//	var _ vmm.FullDriver = (*Driver)(nil)
+//
+// The point is what happens when an eleventh capability is added below. Because
+// every caller reaches these by assertion, a driver that quietly stops
+// satisfying one degrades the fleet with no error anywhere: no test fails, no
+// log line appears, the manager just takes the other branch forever. One line
+// per driver turns that into a build failure in every driver at once, which is
+// the only moment anybody is looking.
+type FullDriver interface {
+	Driver
+	Archivable
+	DiskReporter
+	TemplateReporter
+	RootfsPresencer
+	Renamer
+	Rebooter
+	CPUStatser
+	NetStatser
+	DiskResizer
+	Ballooner
 }

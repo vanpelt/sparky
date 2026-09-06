@@ -3,6 +3,7 @@
 package firecracker
 
 import (
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -60,7 +61,7 @@ func TestFreshMarkerRidesOnlyAFirstBoot(t *testing.T) {
 
 func testDriver(t *testing.T) *Driver {
 	t.Helper()
-	return &Driver{guestNet: guestnet.MustParse("")}
+	return &Driver{net: hostnet.Plumbing{Net: guestnet.MustParse(""), TapPrefix: tapPrefix}}
 }
 
 // Who may pass fresh=true to boot.

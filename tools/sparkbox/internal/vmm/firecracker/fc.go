@@ -15,9 +15,6 @@ package firecracker
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +22,6 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -36,13 +32,24 @@ import (
 
 	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
-	xssh "golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/guestnet"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmhelper"
 	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestargs"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/guestdisk"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hoststat"
 )
+
+// Every optional capability in vmm, asserted at compile time. host.Manager
+// reaches each of these by type assertion and falls back silently when the
+// assertion fails, so a capability lost to a refactor — a receiver changed from
+// pointer to value, a method renamed, a signature drifting — degrades the fleet
+// with no error anywhere. This line is the only thing that turns that into a
+// build failure.
+var _ vmm.FullDriver = (*Driver)(nil)
 
 type Options struct {
 	// KernelPath is an uncompressed vmlinux built with the microVM config.
@@ -133,16 +140,19 @@ type Driver struct {
 	// creating holds the names of Creates that have released d.mu to do their
 	// rootfs disk work. A name is in exactly one of creating and vms.
 	creating map[string]bool
-	guestNet guestnet.Network
+	net      hostnet.Plumbing
 	// reservedSlots holds /30s occupied by a host service address, such as a
 	// dedicated in-prefix sluice DNS listener. They count toward prefix
 	// capacity but are never handed to a VM.
 	reservedSlots map[int]bool
-	prefix6       net.IP // parsed /64 network address; nil disables IPv6
-	uplink6       string // iface backing the v6 default route, for per-guest proxy NDP
 }
 
 const (
+	// tapPrefix names this driver's host tap devices. It must not be a prefix
+	// of, or prefixed by, another driver's: each driver's startup sweep deletes
+	// stale devices carrying its own prefix, so an overlap means constructing
+	// one driver eats the other's live networking.
+	tapPrefix            = "sbtap"
 	defaultJailerUIDBase = 100000
 	jailedSocketName     = "fc.sock"
 	jailedKernelName     = "vmlinux"
@@ -256,12 +266,13 @@ func New(opts Options) (*Driver, error) {
 			}
 		}
 	}
-	if err := validateGuestDNS(opts.GuestDNS); err != nil {
+	if err := guestargs.ValidateDNS(opts.GuestDNS); err != nil {
 		return nil, err
 	}
 	d := &Driver{
 		opts: opts, vms: map[string]*vmState{}, creating: map[string]bool{},
-		guestNet: guestNetwork, reservedSlots: map[int]bool{},
+		net:           hostnet.Plumbing{Net: guestNetwork, TapPrefix: tapPrefix},
+		reservedSlots: map[int]bool{},
 	}
 	if dnsAddr, err := netip.ParseAddr(opts.GuestDNS); err == nil {
 		if index, ok := guestNetwork.SlotContaining(dnsAddr.Unmap()); ok {
@@ -292,13 +303,13 @@ func New(opts Options) (*Driver, error) {
 				)
 			}
 		}
-		d.prefix6 = ipNet.IP.To16()
+		d.net.Prefix6 = ipNet.IP.To16()
 		// Scaleway (and most providers) deliver the routed /64 on-link: the
 		// upstream router NDP-resolves each guest's /128 on the segment, and the
 		// host only auto-answers for its own addresses. Per-VM addresses live on
 		// the taps, so without proxy NDP on the uplink their return traffic is
 		// dropped. Record the uplink now; createTap adds a proxy entry per guest.
-		d.uplink6 = defaultRoute6Dev()
+		d.net.Uplink6 = hostnet.DefaultRoute6Dev()
 	}
 	if opts.PrivilegedHelperSocket == "" {
 		if _, err := os.Stat("/dev/kvm"); err != nil {
@@ -312,7 +323,7 @@ func New(opts Options) (*Driver, error) {
 	// devices behind; the first Create would then fail with "Device or resource
 	// busy". Nothing is running in a fresh process, so sweep them now.
 	if opts.PrivilegedHelperSocket == "" {
-		sweepStaleTaps()
+		d.net.SweepStale()
 	}
 	return d, nil
 }
@@ -357,27 +368,22 @@ func validateJailerPair(firecrackerBin, jailerBin string) error {
 	return nil
 }
 
-// sweepStaleTaps deletes leftover sbtap* devices from a prior process. Safe at
-// startup only — call before any VM exists.
-func sweepStaleTaps() {
-	out, err := exec.Command("ip", "-o", "link", "show").Output()
-	if err != nil {
+// createTap and deleteTap add the one thing that is this driver's own: under
+// the privileged helper the tap is created and destroyed by the helper, in the
+// Pod network namespace both containers share, so the driver must not touch it.
+func (d *Driver) createTap(ctx context.Context, idx int) error {
+	if d.opts.PrivilegedHelperSocket != "" {
+		return nil
+	}
+	return d.net.CreateTap(ctx, idx)
+}
+
+func (d *Driver) deleteTap(idx int) {
+	if d.opts.PrivilegedHelperSocket != "" {
+		// Helper cleanup is synchronized with the launch-client process exit.
 		return
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		// "3: sbtap1@if4: <BROADCAST,...>" -> field 1 is the name.
-		parts := strings.SplitN(line, ": ", 3)
-		if len(parts) < 2 {
-			continue
-		}
-		name := parts[1]
-		if i := strings.IndexByte(name, '@'); i >= 0 {
-			name = name[:i]
-		}
-		if strings.HasPrefix(name, "sbtap") {
-			exec.Command("ip", "link", "del", name).Run() //nolint:errcheck
-		}
-	}
+	d.net.DeleteTap(idx)
 }
 
 func (d *Driver) vmDir(name string) string {
@@ -531,74 +537,6 @@ func chrootProcess(ctx context.Context, root, executable string, jailUID int) *e
 	return cmd
 }
 
-func (d *Driver) hostIP(idx int) string  { return d.guestSlot(idx).Host.String() }
-func (d *Driver) guestIP(idx int) string { return d.guestSlot(idx).Guest.String() }
-func tapName(idx int) string             { return fmt.Sprintf("sbtap%d", idx) }
-
-func (d *Driver) guestSlot(idx int) guestnet.Slot {
-	slot, err := d.guestNet.Slot(idx)
-	if err != nil {
-		// Slots are allocated by freeSlot and stored in vmState, so reaching
-		// this means an internal invariant was violated rather than bad input.
-		panic(err)
-	}
-	return slot
-}
-
-// validateGuestDNS accepts only the empty string (feature off), the "gateway"
-// sentinel, or a bare IP literal. Anything else — a hostname, or a value with
-// whitespace that would inject extra kernel args — is rejected, so a typo in
-// --guest-dns fails loudly instead of producing a malformed cmdline or an
-// unusable /etc/resolv.conf inside the guest.
-func validateGuestDNS(guestDNS string) error {
-	switch guestDNS {
-	case "", "gateway":
-		return nil
-	}
-	if _, err := netip.ParseAddr(guestDNS); err != nil {
-		return fmt.Errorf("guest-dns %q: must be \"gateway\" or an IP address", guestDNS)
-	}
-	return nil
-}
-
-// guestDNSArg builds the sparkbox_dns kernel-arg fragment (with a leading space)
-// for the guest netcfg hook. The sentinel "gateway" expands to this VM's gateway
-// address, where the sluice allowlist resolver listens; an IP literal is used
-// verbatim. An empty setting yields no arg, leaving the guest on public DNS.
-func guestDNSArg(guestDNS, gatewayIP string) (string, error) {
-	if err := validateGuestDNS(guestDNS); err != nil {
-		return "", err
-	}
-	switch guestDNS {
-	case "":
-		return "", nil
-	case "gateway":
-		return " sparkbox_dns=" + gatewayIP, nil
-	default:
-		return " sparkbox_dns=" + guestDNS, nil
-	}
-}
-
-// IPv6 addressing: each slot gets a point-to-point /127 carved from the /64,
-// host on the even address and guest on the odd one. IPv4 slot indexes begin
-// at zero, so add one before deriving the IPv6 offset: slot idx=0 becomes
-// ::2 (host) / ::3 (guest), leaving ::1 free for the host's own edge address
-// (the AAAA target). Globally routable, so egress needs no NAT — just host
-// forwarding.
-func (d *Driver) hostIP6(idx int) string  { return d.addr6((idx + 1) * 2) }
-func (d *Driver) guestIP6(idx int) string { return d.addr6((idx+1)*2 + 1) }
-
-func (d *Driver) addr6(off int) string {
-	ip := make(net.IP, net.IPv6len)
-	copy(ip, d.prefix6)
-	// Place the offset in the low 32 bits of the /64's host portion.
-	ip[12] = byte(off >> 24)
-	ip[13] = byte(off >> 16)
-	ip[14] = byte(off >> 8)
-	ip[15] = byte(off)
-	return ip.String()
-}
-
 func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, error) {
 	// Preparing the rootfs means a template copy and a loop mount that may
 	// replay an ext4 journal on a 25 GiB image — far too slow to hold the
@@ -631,7 +569,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 	switch _, err := os.Stat(rootfs); {
 	case os.IsNotExist(err):
 		template := d.templatePath(cfg.Image)
-		if err := reflinkClone(ctx, template, rootfs); err != nil {
+		if err := guestdisk.Clone(ctx, template, rootfs); err != nil {
 			return nil, err
 		}
 		fresh = true
@@ -648,7 +586,7 @@ func (d *Driver) Create(ctx context.Context, cfg vmm.Config) (*vmm.Instance, err
 			"a previous sandbox of this name did not finish being destroyed", cfg.Name, rootfs)
 	}
 	if !d.opts.DisableHostRootfsMounts {
-		if err := installAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
+		if err := guestdisk.InstallAuthorizedKey(ctx, rootfs, d.opts.LoginUser, cfg.GatewayPublicKey); err != nil {
 			return nil, fmt.Errorf("install gateway key: %w", err)
 		}
 	}
@@ -707,13 +645,13 @@ func (d *Driver) freeSlot() (int, error) {
 	for _, s := range d.vms {
 		used[s.idx] = true
 	}
-	for idx := 0; idx < d.guestNet.Capacity(); idx++ {
+	for idx := 0; idx < d.net.Net.Capacity(); idx++ {
 		if !used[idx] && !d.reservedSlots[idx] {
 			return idx, nil
 		}
 	}
 	return 0, fmt.Errorf("no free network slots in %s (max %d concurrent VMs)",
-		d.guestNet, d.guestNet.Capacity())
+		d.net.Net, d.net.Net.Capacity())
 }
 
 // boot starts a Firecracker process for the VM; snapshot, when non-nil, is
@@ -729,12 +667,12 @@ func (d *Driver) kernelArgs(name string, idx int, fresh bool) (string, error) {
 	// hook (build-rootfs.sh), which reads sparkbox_ip6/sparkbox_gw6 here.
 	kernelArgs := fmt.Sprintf(
 		"console=ttyS0 reboot=k panic=1 pci=off quiet ip=%s::%s:255.255.255.252::eth0:off sparkbox_host=%s systemd.machine_id=%s",
-		d.guestIP(idx), d.hostIP(idx), name, machineIDFor(name))
-	if d.prefix6 != nil {
+		d.net.GuestIP(idx), d.net.HostIP(idx), name, guestargs.MachineID(name))
+	if d.net.Prefix6 != nil {
 		kernelArgs += fmt.Sprintf(" sparkbox_ip6=%s/127 sparkbox_gw6=%s",
-			d.guestIP6(idx), d.hostIP6(idx))
+			d.net.GuestIP6(idx), d.net.HostIP6(idx))
 	}
-	dnsArg, err := guestDNSArg(d.opts.GuestDNS, d.hostIP(idx))
+	dnsArg, err := guestargs.DNSArg(d.opts.GuestDNS, d.net.HostIP(idx))
 	if err != nil {
 		return "", err
 	}
@@ -798,8 +736,8 @@ func (d *Driver) boot(ctx context.Context, name string, vcpus, memMB int64, st *
 		}},
 		NetworkInterfaces: sdk.NetworkInterfaces{{
 			StaticConfiguration: &sdk.StaticNetworkConfiguration{
-				HostDevName: tapName(st.idx),
-				MacAddress:  macFor(st.idx),
+				HostDevName: d.net.TapName(st.idx),
+				MacAddress:  hostnet.MAC(0x00, st.idx),
 			},
 		}},
 		MachineCfg: models.MachineConfiguration{
@@ -1181,11 +1119,6 @@ func (d *Driver) Destroy(_ context.Context, name string) error {
 	return errors.Join(os.RemoveAll(d.vmDir(name)), d.cleanupJail(st.idx))
 }
 
-// imageNameRe bounds a snapshot/template basename so Snapshot can't be tricked
-// into writing outside ImageDir. Mirrors the manager's sandbox-name rules but
-// also allows the '.' and uppercase we use in derived template names.
-var imageNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,126}$`)
-
 // --- Archivable + DiskReporter: the disk-lifecycle capabilities ------------
 
 func (d *Driver) rootfsPath(name string) string {
@@ -1219,7 +1152,7 @@ func (d *Driver) PackRootfs(ctx context.Context, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := compact(ctx, rootfs); err != nil {
+	if err := guestdisk.Compact(ctx, rootfs); err != nil {
 		return "", err
 	}
 	// Archive is a cold restore, so the memory snapshot is dead weight — dropping
@@ -1290,7 +1223,7 @@ func (d *Driver) RootfsPresent(name string) (bool, error) {
 // reusable ImageDir template. Reflink-copies first (never mutates the source
 // VM's disk), sanitizes per-guest identity, compacts, then renames into place.
 func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
-	if !imageNameRe.MatchString(newImage) {
+	if !guestdisk.ValidImageName(newImage) {
 		return fmt.Errorf("invalid snapshot image name %q", newImage)
 	}
 	rootfs, err := d.stoppedRootfs(name)
@@ -1304,7 +1237,7 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	tmp := filepath.Join(out, "."+newImage+".ext4.tmp")
 	final := filepath.Join(out, newImage+".ext4")
 	os.Remove(tmp) //nolint:errcheck // clear any torn prior attempt
-	if err := reflinkClone(ctx, rootfs, tmp); err != nil {
+	if err := guestdisk.Clone(ctx, rootfs, tmp); err != nil {
 		return err
 	}
 	// Belt-and-braces, and only where the belt exists.
@@ -1326,12 +1259,12 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 	//
 	// See docs/cks-snapshot-design.md.
 	if !d.opts.DisableHostRootfsMounts {
-		if err := sanitizeTemplate(ctx, tmp); err != nil {
+		if err := guestdisk.Sanitize(ctx, tmp); err != nil {
 			os.Remove(tmp) //nolint:errcheck
 			return err
 		}
 	}
-	if err := compact(ctx, tmp); err != nil {
+	if err := guestdisk.Compact(ctx, tmp); err != nil {
 		os.Remove(tmp) //nolint:errcheck
 		return err
 	}
@@ -1346,27 +1279,6 @@ func (d *Driver) Snapshot(ctx context.Context, name, newImage string) error {
 		user = "root"
 	}
 	os.WriteFile(final+".login-user", []byte(user+"\n"), 0o644) //nolint:errcheck
-	return nil
-}
-
-// reflinkClone makes the no-full-copy policy common to fresh VM disks and
-// snapshot staging. Keeping the exact cp invocation here also gives tests one
-// seam for proving that neither path can silently regress to --reflink=auto.
-func reflinkClone(ctx context.Context, source, destination string) error {
-	if out, err := exec.CommandContext(
-		ctx, "cp", "--reflink=always", source, destination,
-	).CombinedOutput(); err != nil {
-		os.Remove(destination) //nolint:errcheck // never let a torn clone pass Create's exists check
-		// Trimmed, because cp's diagnostic ends in a newline and this sentence
-		// has to survive a trip across the node link. ctlops.wireSentence
-		// blanks any message containing a control character — a correct
-		// defence against a peer forging terminal output — and replaces it
-		// with "the remote host reported a failure it could not describe". So
-		// an untrimmed cp error reaches the operator as no error at all: this
-		// exact newline once turned "cannot open ... Permission denied" into a
-		// sentence that named nothing and cost an afternoon.
-		return fmt.Errorf("copy rootfs: %v: %s", err, strings.TrimSpace(string(out)))
-	}
 	return nil
 }
 
@@ -1401,7 +1313,7 @@ func (d *Driver) templatePath(image string) string {
 
 // RemoveTemplate implements vmm.Archivable: delete a snapshot template + sidecar.
 func (d *Driver) RemoveTemplate(_ context.Context, image string) error {
-	if !imageNameRe.MatchString(image) {
+	if !guestdisk.ValidImageName(image) {
 		return fmt.Errorf("invalid template name %q", image)
 	}
 	if d.opts.ImageDir == "" {
@@ -1436,78 +1348,8 @@ func (d *Driver) DiskUsageMB(_ context.Context, name string) (int64, error) {
 	if _, err := os.Stat(rootfs); err != nil {
 		return 0, nil
 	}
-	used, _, err := ext4DiskMB(rootfs)
+	used, _, err := guestdisk.DiskMB(rootfs)
 	return used, err
-}
-
-// ext4DiskMB reads the primary ext4 superblock directly and follows statfs(2):
-// capacity = total blocks - filesystem metadata overhead, used = capacity -
-// free. Both come from the same superblock read so the console's meter has a
-// numerator and denominator on the same basis — measuring used against the raw
-// image size instead would leave a genuinely full guest short of 100% by
-// however much metadata the filesystem holds. Firecracker owns the image and
-// may have it mounted in a guest, so invoking e2fsck/debugfs here would be
-// unsafe; a fixed-size read is passive and gives a sufficiently fresh
-// best-effort counter for the periodic console measurement.
-func ext4DiskMB(path string) (usedMB, capacityMB int64, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer f.Close()
-
-	const (
-		superOffset      = 1024
-		superSize        = 1024
-		ext4Magic        = 0xef53
-		incompat64Bit    = 0x80
-		roCompatBigalloc = 0x200
-		maxLogBlockSize  = 6 // 1024 << 6 == ext4's 64 KiB maximum
-		bytesPerMiB      = 1024 * 1024
-		maxSignedInt64   = uint64(1<<63 - 1)
-	)
-	sb := make([]byte, superSize)
-	if _, err := f.ReadAt(sb, superOffset); err != nil {
-		return 0, 0, fmt.Errorf("read ext4 superblock: %w", err)
-	}
-	if magic := binary.LittleEndian.Uint16(sb[0x38:0x3a]); magic != ext4Magic {
-		return 0, 0, fmt.Errorf("rootfs has invalid ext4 magic %#x", magic)
-	}
-	logBlockSize := binary.LittleEndian.Uint32(sb[0x18:0x1c])
-	if logBlockSize > maxLogBlockSize {
-		return 0, 0, fmt.Errorf("rootfs has invalid ext4 block-size shift %d", logBlockSize)
-	}
-	blocks := uint64(binary.LittleEndian.Uint32(sb[0x04:0x08]))
-	free := uint64(binary.LittleEndian.Uint32(sb[0x0c:0x10]))
-	incompat := binary.LittleEndian.Uint32(sb[0x60:0x64])
-	roCompat := binary.LittleEndian.Uint32(sb[0x64:0x68])
-	if roCompat&roCompatBigalloc != 0 {
-		return 0, 0, fmt.Errorf("rootfs ext4 bigalloc is not supported for disk accounting")
-	}
-	if incompat&incompat64Bit != 0 {
-		blocks |= uint64(binary.LittleEndian.Uint32(sb[0x150:0x154])) << 32
-		free |= uint64(binary.LittleEndian.Uint32(sb[0x158:0x15c])) << 32
-	}
-	if free > blocks {
-		return 0, 0, fmt.Errorf("rootfs ext4 free blocks %d exceed total blocks %d", free, blocks)
-	}
-	blockSize := uint64(1024) << logBlockSize
-	usedBlocks := blocks - free
-	// s_overhead_last is the number of filesystem-metadata blocks excluded
-	// from statfs.f_blocks, and therefore from both `df`'s used figure and its
-	// total.
-	overhead := uint64(binary.LittleEndian.Uint32(sb[0x248:0x24c]))
-	if overhead > usedBlocks {
-		return 0, 0, fmt.Errorf("rootfs ext4 overhead blocks %d exceed occupied blocks %d",
-			overhead, usedBlocks)
-	}
-	usedBlocks -= overhead
-	capacityBlocks := blocks - overhead
-	if capacityBlocks > maxSignedInt64/blockSize {
-		return 0, 0, fmt.Errorf("rootfs ext4 block count overflows int64")
-	}
-	return int64(usedBlocks * blockSize / bytesPerMiB),
-		int64(capacityBlocks * blockSize / bytesPerMiB), nil
 }
 
 // ResizeDisk implements vmm.DiskResizer: grow a stopped sandbox's rootfs to
@@ -1539,7 +1381,7 @@ func (d *Driver) ResizeDisk(ctx context.Context, name string, sizeMB int64) erro
 	if out, err := exec.CommandContext(ctx, "e2fsck", "-fy", rootfs).CombinedOutput(); err != nil {
 		// e2fsck exits 1 when it fixed something, which is success for us; only
 		// 4+ (uncorrected errors) is fatal.
-		if code := exitCode(err); code > 2 {
+		if code := guestdisk.ExitCode(err); code > 2 {
 			return fmt.Errorf("e2fsck: %v: %s", err, out)
 		}
 	}
@@ -1550,15 +1392,6 @@ func (d *Driver) ResizeDisk(ctx context.Context, name string, sizeMB int64) erro
 		return fmt.Errorf("resize2fs: %v: %s", err, out)
 	}
 	return nil
-}
-
-// exitCode extracts a process exit status, or -1 if err isn't an exit error.
-func exitCode(err error) int {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return ee.ExitCode()
-	}
-	return -1
 }
 
 // DiskCapacityMB implements vmm.DiskReporter: the guest's hard ceiling, read
@@ -1573,12 +1406,12 @@ func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
 	if _, err := os.Stat(rootfs); err != nil {
 		return 0, nil
 	}
-	_, capacity, err := ext4DiskMB(rootfs)
+	_, capacity, err := guestdisk.DiskMB(rootfs)
 	return capacity, err
 }
 
 // TemplateUsageMB implements vmm.TemplateReporter: the used blocks of a base or
-// snapshot template in ImageDir, read through the SAME ext4DiskMB DiskUsageMB
+// snapshot template in ImageDir, read through the SAME guestdisk.DiskMB DiskUsageMB
 // uses. That identity is the whole point — the two figures come off the same
 // superblock fields on the same basis, so the manager can subtract one from the
 // other and get the blocks a fork actually wrote.
@@ -1588,7 +1421,7 @@ func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
 // renames, and deploy/refresh-agent-tools.sh patches base images by
 // reflink/mount/atomic-rename, so the superblock we read is always quiesced.
 //
-// image arrives from a persisted sandbox record, so re-apply imageNameRe before
+// image arrives from a persisted sandbox record, so re-apply the image-name bound before
 // joining it: a record carrying "../../etc/passwd" must not walk out of
 // ImageDir. (Create's own template join deliberately does not do this and is
 // left alone — tightening it is an unrelated behaviour change.)
@@ -1597,13 +1430,13 @@ func (d *Driver) DiskCapacityMB(_ context.Context, name string) (int64, error) {
 // contract: the manager keeps its last baseline rather than spiking every
 // fork's pooled charge when a snapshot is deleted.
 func (d *Driver) TemplateUsageMB(_ context.Context, image string) (int64, error) {
-	if !imageNameRe.MatchString(image) {
+	if !guestdisk.ValidImageName(image) {
 		return 0, fmt.Errorf("invalid template image name %q", image)
 	}
 	if d.opts.ImageDir == "" {
 		return 0, errors.New("no image dir configured; cannot measure a template")
 	}
-	used, _, err := ext4DiskMB(d.templatePath(image))
+	used, _, err := guestdisk.DiskMB(d.templatePath(image))
 	return used, err
 }
 
@@ -1661,11 +1494,6 @@ func (d *Driver) RenameVM(oldName, newName string) error {
 	return nil
 }
 
-// userHZ is the fixed unit /proc/<pid>/stat reports utime/stime in (10ms
-// ticks). It is part of the kernel's userspace ABI, constant regardless of
-// the kernel's CONFIG_HZ.
-const userHZ = 100
-
 // CPUTimeNanos implements vmm.CPUStatser: cumulative utime+stime of the
 // firecracker process from /proc/<pid>/stat. This measures the whole FC
 // process (vCPU threads + VMM overhead), so surface it to users as "host
@@ -1686,15 +1514,7 @@ func (d *Driver) CPUTimeNanos(_ context.Context, name string) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	ticks, err := procStatCPUTicks(string(data))
-	if err != nil {
-		return 0, err
-	}
-	return ticks * (1_000_000_000 / userHZ), nil
+	return hoststat.CPUNanos(pid)
 }
 
 // NetBytes implements vmm.NetStatser from the host tap's byte counters.
@@ -1710,339 +1530,15 @@ func (d *Driver) NetBytes(_ context.Context, name string) (rx, tx uint64, err er
 	if !ok || st.machine == nil {
 		return 0, 0, fmt.Errorf("vm %q not running", name)
 	}
-	tap := tapName(st.idx)
+	tap := d.net.TapName(st.idx)
 	// Guest rx is the tap's tx and vice versa.
-	if rx, err = readTapCounter(tap, "tx_bytes"); err != nil {
+	if rx, err = hoststat.TapCounter(tap, "tx_bytes"); err != nil {
 		return 0, 0, err
 	}
-	if tx, err = readTapCounter(tap, "rx_bytes"); err != nil {
+	if tx, err = hoststat.TapCounter(tap, "rx_bytes"); err != nil {
 		return 0, 0, err
 	}
 	return rx, tx, nil
-}
-
-// readTapCounter reads one of a tap device's sysfs byte counters.
-func readTapCounter(tap, stat string) (uint64, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/statistics/%s", tap, stat))
-	if err != nil {
-		return 0, err
-	}
-	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s/%s: %w", tap, stat, err)
-	}
-	return n, nil
-}
-
-// procStatCPUTicks sums the utime and stime fields (14 and 15) of a
-// /proc/<pid>/stat line. The comm field may itself contain spaces and ')',
-// so fields are counted from the last ')' rather than split naively.
-func procStatCPUTicks(stat string) (uint64, error) {
-	i := strings.LastIndexByte(stat, ')')
-	if i < 0 {
-		return 0, fmt.Errorf("malformed stat line %q", stat)
-	}
-	fields := strings.Fields(stat[i+1:])
-	// fields[0] is field 3 (state), so utime/stime land at indices 11/12.
-	if len(fields) < 13 {
-		return 0, fmt.Errorf("stat line has %d fields after comm, want >= 13", len(fields))
-	}
-	utime, err := strconv.ParseUint(fields[11], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("utime: %w", err)
-	}
-	stime, err := strconv.ParseUint(fields[12], 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("stime: %w", err)
-	}
-	return utime + stime, nil
-}
-
-// compact fscks then zeroes the free space of an unmounted ext4 image so a
-// following zstd/reflink only carries used blocks. e2fsck -fy is mandatory
-// before zerofree (which refuses a dirty fs) and repairs the unclean state a
-// killed VMM leaves the disk in.
-func compact(ctx context.Context, path string) error {
-	cmd := exec.CommandContext(ctx, "e2fsck", "-fy", path)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		// e2fsck exits 1/2 when it *corrected* errors — success for us; only >= 4
-		// (uncorrected or operational error) is fatal.
-		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() >= 4 {
-			return fmt.Errorf("e2fsck %s: %v: %s", path, err, out)
-		}
-	}
-	if o, err := exec.CommandContext(ctx, "zerofree", path).CombinedOutput(); err != nil {
-		return fmt.Errorf("zerofree %s: %v: %s", path, err, o)
-	}
-	return nil
-}
-
-// machineIDFor derives this sandbox's /etc/machine-id from its name.
-//
-// It exists because of forks and old templates. Current base images and
-// captures carry an empty machine-id, but older templates can be byte-for-byte
-// copies of somebody's populated rootfs, and PID 1 reads that file before any
-// unit runs. systemd reads systemd.machine_id= off the kernel command line when
-// the file is uninitialised; the host writes that argument per boot and no guest
-// can forge it, so every clean fork differs from its parent from PID 1 onward.
-//
-// Derived rather than random so it is STABLE across the sandbox's own boots: a
-// machine id that changed every time would give journald a new machine
-// directory on every resume. It changes on a rename, which is the same
-// tradeoff the hostname already makes.
-//
-// The guest-side pre-capture clear and sparkbox-identity-reset stay regardless:
-// they cover dbus, SSH host keys, old templates, and images with no systemd to
-// read this at all.
-func machineIDFor(name string) string {
-	sum := sha256.Sum256([]byte("sparkbox-machine-id\x00" + name))
-	return hex.EncodeToString(sum[:16])
-}
-
-type loginIdentity struct {
-	home     string
-	uid, gid int
-}
-
-func rootfsLoginIdentity(passwd []byte, user string) (loginIdentity, error) {
-	if user == "" {
-		user = "root"
-	}
-	for _, line := range strings.Split(string(passwd), "\n") {
-		fields := strings.Split(line, ":")
-		if len(fields) < 7 || fields[0] != user {
-			continue
-		}
-		uid, uerr := strconv.Atoi(fields[2])
-		gid, gerr := strconv.Atoi(fields[3])
-		home := filepath.Clean(fields[5])
-		if uerr != nil || gerr != nil || !filepath.IsAbs(home) || home == "/" {
-			return loginIdentity{}, fmt.Errorf("invalid passwd entry for %q", user)
-		}
-		return loginIdentity{home: home, uid: uid, gid: gid}, nil
-	}
-	return loginIdentity{}, fmt.Errorf("login user %q not found in guest /etc/passwd", user)
-}
-
-func installAuthorizedKey(ctx context.Context, rootfs, loginUser, key string) (retErr error) {
-	if key == "" {
-		return nil
-	}
-	publicKey, _, _, rest, err := xssh.ParseAuthorizedKey([]byte(key))
-	if err != nil {
-		return fmt.Errorf("gateway upstream public key is invalid: %w", err)
-	}
-	if len(strings.TrimSpace(string(rest))) != 0 {
-		return errors.New("gateway upstream public key is invalid: trailing data")
-	}
-	key = strings.TrimSpace(string(xssh.MarshalAuthorizedKey(publicKey)))
-	mnt, err := os.MkdirTemp("", "sparkbox-key-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(mnt) //nolint:errcheck
-	if out, err := exec.CommandContext(ctx, "mount", "-o", "loop", rootfs, mnt).CombinedOutput(); err != nil {
-		return fmt.Errorf("mount %s: %v: %s", rootfs, err, out)
-	}
-	defer func() {
-		if out, err := exec.Command("umount", mnt).CombinedOutput(); err != nil && retErr == nil {
-			retErr = fmt.Errorf("umount %s: %v: %s", mnt, err, out)
-		}
-	}()
-	return writeAuthorizedKey(mnt, loginUser, key)
-}
-
-// writeAuthorizedKey puts key in the login user's authorized_keys inside an
-// already-mounted guest rootfs.
-//
-// Everything here touches a filesystem the guest owns and can have rewritten
-// arbitrarily, so it goes through os.Root: every path resolves beneath mnt,
-// and a symlink that would escape it (any absolute one, or a relative one
-// climbing past the root) is refused rather than followed onto the host.
-// Without that a guest could point ~/.ssh at /etc/ssh and have the root-owned
-// gateway chown and write *host* files on its next cold boot.
-func writeAuthorizedKey(mnt, loginUser, key string) error {
-	root, err := os.OpenRoot(mnt)
-	if err != nil {
-		return fmt.Errorf("open rootfs %s: %w", mnt, err)
-	}
-	defer root.Close() //nolint:errcheck
-
-	passwd, err := root.ReadFile("etc/passwd")
-	if err != nil {
-		return err
-	}
-	identity, err := rootfsLoginIdentity(passwd, loginUser)
-	if err != nil {
-		return err
-	}
-	home := strings.TrimPrefix(identity.home, "/")
-	if err := ensureGuestDir(root, home, 0o755, identity); err != nil {
-		return err
-	}
-	// ~/.ssh is the exception to ensureGuestDir's leave-it-alone rule: sshd's
-	// StrictModes ignores authorized_keys in a directory the login user does
-	// not own or that anyone else can write, so these two are enforced even on
-	// a directory the guest already had.
-	sshDir := path.Join(home, ".ssh")
-	if err := ensureGuestDir(root, sshDir, 0o700, identity); err != nil {
-		return err
-	}
-	if err := root.Chmod(sshDir, 0o700); err != nil {
-		return err
-	}
-	if err := root.Lchown(sshDir, identity.uid, identity.gid); err != nil {
-		return err
-	}
-
-	// A read failure is not fatal: absent is the common case, and a dangling
-	// symlink or a directory sitting in authorized_keys' place is the guest's
-	// own mess — either way the gateway key still has to land. Replace whatever
-	// is there rather than writing through it.
-	authorizedKeys := path.Join(sshDir, "authorized_keys")
-	existing, _ := root.ReadFile(authorizedKeys) //nolint:errcheck
-	if err := root.RemoveAll(authorizedKeys); err != nil {
-		return err
-	}
-	if err := root.WriteFile(authorizedKeys, mergeAuthorizedKeys(existing, key), 0o600); err != nil {
-		return err
-	}
-	return root.Lchown(authorizedKeys, identity.uid, identity.gid)
-}
-
-// ensureGuestDir makes name a real directory inside the guest rootfs.
-//
-// A directory that is already there is left exactly as it is — mode and
-// ownership included, since a guest may legitimately run a 0750 home and it is
-// not our place to widen it. Anything else is replaced: a regular file, or the
-// symlink a guest plants to aim our writes somewhere it prefers. A directory we
-// create gets perm and the login user, because a root-owned home is precisely
-// what makes sshd's StrictModes refuse the account later.
-func ensureGuestDir(root *os.Root, name string, perm os.FileMode, identity loginIdentity) error {
-	switch fi, err := root.Lstat(name); {
-	case err == nil && fi.IsDir():
-		return nil
-	case err == nil:
-		if err := root.Remove(name); err != nil {
-			return err
-		}
-	case !os.IsNotExist(err):
-		return err
-	}
-	if err := root.MkdirAll(name, perm); err != nil {
-		return err
-	}
-	if err := root.Chmod(name, perm); err != nil {
-		return err
-	}
-	return root.Lchown(name, identity.uid, identity.gid)
-}
-
-// mergeAuthorizedKeys adds the gateway key to a guest's existing
-// authorized_keys instead of replacing the file. Create is not only the
-// first-boot path — the manager re-runs it whenever a resume fails — so
-// overwriting would silently drop keys the user added inside their own
-// sandbox. Duplicates of the gateway key itself are collapsed, comparing the
-// parsed key so a differing comment or option prefix is not mistaken for a
-// second key.
-func mergeAuthorizedKeys(existing []byte, key string) []byte {
-	var out []string
-	for _, line := range strings.Split(string(existing), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if sameAuthorizedKey(line, key) {
-			continue
-		}
-		out = append(out, line)
-	}
-	out = append(out, key)
-	return []byte(strings.Join(out, "\n") + "\n")
-}
-
-// sameAuthorizedKey reports whether two authorized_keys lines carry the same
-// public key. Both sides are reduced to the bare type-and-blob form so a
-// differing comment or option prefix is not read as a second key — the gateway
-// key arrives with a comment on it, and a line that already holds it will have
-// whatever comment the last write left behind.
-func sameAuthorizedKey(a, b string) bool {
-	normalize := func(line string) (string, bool) {
-		pub, _, _, _, err := xssh.ParseAuthorizedKey([]byte(line))
-		if err != nil {
-			return "", false
-		}
-		return strings.TrimSpace(string(xssh.MarshalAuthorizedKey(pub))), true
-	}
-	na, aok := normalize(a)
-	nb, bok := normalize(b)
-	return aok && bok && na == nb
-}
-
-// sanitizeTemplate strips a rootfs of its per-guest identity so every fork gets
-// a fresh one — the same end state hack/build-rootfs.sh gives a freshly built
-// template (blank machine id and hostname, no journal or SSH host keys; the
-// sparkbox-netcfg boot hook regenerates the keys via ssh-keygen -A). Best-effort
-// per file: a template missing any of these is still valid.
-func sanitizeTemplate(ctx context.Context, imagePath string) (retErr error) {
-	mnt, err := os.MkdirTemp("", "sparkbox-snap-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(mnt) //nolint:errcheck
-	if o, err := exec.CommandContext(ctx, "mount", "-o", "loop", imagePath, mnt).CombinedOutput(); err != nil {
-		return fmt.Errorf("mount %s: %v: %s", imagePath, err, o)
-	}
-	defer func() {
-		if o, err := exec.Command("umount", mnt).CombinedOutput(); err != nil && retErr == nil {
-			retErr = fmt.Errorf("umount %s: %v: %s", mnt, err, o)
-		}
-	}()
-
-	// Snapshot images came from a guest and every directory entry in them is
-	// attacker-controlled. os.Root gives the sanitization pass openat-style
-	// beneath-root resolution, so an absolute /etc/hostname symlink (or a
-	// relative chain containing ..) cannot redirect these root operations into
-	// the Sparkbox container's filesystem.
-	root, err := os.OpenRoot(mnt)
-	if err != nil {
-		return fmt.Errorf("open snapshot rootfs: %w", err)
-	}
-	defer root.Close() //nolint:errcheck
-	for _, rel := range []string{"var/lib/dbus/machine-id", "etc/resolv.conf"} {
-		root.RemoveAll(rel) //nolint:errcheck
-	}
-	// Keep /etc/machine-id present but empty. Besides being systemd's documented
-	// image-builder state, the file is needed if /etc is ever read-only: PID 1
-	// can bind-mount a transient id over an existing empty file, not an absent
-	// path.
-	if err := root.WriteFile("etc/machine-id", nil, 0o644); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if journal, err := root.Open("var/log/journal"); err == nil {
-		if entries, err := journal.ReadDir(-1); err == nil {
-			for _, entry := range entries {
-				root.RemoveAll(path.Join("var/log/journal", entry.Name())) //nolint:errcheck
-			}
-		}
-		journal.Close() //nolint:errcheck
-	}
-	root.RemoveAll("etc/hostname") //nolint:errcheck
-	if err := root.WriteFile("etc/hostname", nil, 0o644); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if sshDir, err := root.Open("etc/ssh"); err == nil {
-		if entries, err := sshDir.ReadDir(-1); err == nil {
-			for _, entry := range entries {
-				if strings.HasPrefix(entry.Name(), "ssh_host_") {
-					root.RemoveAll(path.Join("etc/ssh", entry.Name())) //nolint:errcheck
-				}
-			}
-		}
-		sshDir.Close() //nolint:errcheck
-	}
-	root.RemoveAll("var/run/secrets/hivemind") //nolint:errcheck
-	root.RemoveAll("run/secrets/hivemind")     //nolint:errcheck
-	return nil
 }
 
 func (d *Driver) Close() error {
@@ -2108,100 +1604,16 @@ func (d *Driver) instance(name string, st *vmState) *vmm.Instance {
 		inst.State = vmm.StatePaused
 	} else {
 		inst.State = vmm.StateRunning
-		inst.SSHAddr = net.JoinHostPort(d.guestIP(st.idx), "22")
+		inst.SSHAddr = net.JoinHostPort(d.net.GuestIP(st.idx), "22")
 		// The proxy reaches in-VM services over the internal v4 hop (works
 		// regardless of whether the guest app binds v4 or ::); the routable v6
 		// is the sandbox's public identity + no-NAT egress.
-		inst.HostIP = d.guestIP(st.idx)
-		if d.prefix6 != nil {
-			inst.GuestV6 = d.guestIP6(st.idx)
+		inst.HostIP = d.net.GuestIP(st.idx)
+		if d.net.Prefix6 != nil {
+			inst.GuestV6 = d.net.GuestIP6(st.idx)
 		}
 	}
 	return inst
-}
-
-// createTap sets up the host side of the VM's network: a tap device owned by
-// this process's user with the host-side /30 address.
-func (d *Driver) createTap(ctx context.Context, idx int) error {
-	if d.opts.PrivilegedHelperSocket != "" {
-		// The helper creates the TAP immediately before launching Firecracker,
-		// in the Pod network namespace shared by both containers.
-		return nil
-	}
-	tap := tapName(idx)
-	cmds := [][]string{
-		{"ip", "tuntap", "add", "dev", tap, "mode", "tap"},
-		{"ip", "addr", "add", d.hostIP(idx) + "/30", "dev", tap},
-	}
-	if d.prefix6 != nil {
-		// Host side of the point-to-point /127; the connected route this creates
-		// is how inbound traffic to the guest's /128 reaches the tap.
-		cmds = append(cmds, []string{"ip", "-6", "addr", "add", d.hostIP6(idx) + "/127", "dev", tap})
-	}
-	cmds = append(cmds, []string{"ip", "link", "set", "dev", tap, "up"})
-	for _, c := range cmds {
-		if out, err := exec.CommandContext(ctx, c[0], c[1:]...).CombinedOutput(); err != nil {
-			return fmt.Errorf("%v: %v: %s", c, err, out)
-		}
-	}
-	// Strict reverse-path filtering: drop any packet from this tap whose source
-	// address doesn't route back to it, so a guest can't source-spoof a
-	// neighbour's address across the host's inter-tap forwarding. Set per-tap
-	// because the kernel takes the max of the "all" and per-device values, so a
-	// permissive host default can't undo it.
-	//
-	// Best-effort, like the proxy-NDP setup below: this is defence in depth, not
-	// the guarantee. The metadata service identifies callers by source address
-	// (see internal/metadata), and TCP already makes that unspoofable — a forged
-	// SYN is answered towards the real owner of the address, so the spoofer
-	// never completes the handshake. Failing sandbox creation over this would
-	// trade a whole-host outage for no real security.
-	exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv4.conf."+tap+".rp_filter=1").Run() //nolint:errcheck
-
-	// Answer NDP for this guest's /128 on the uplink so the provider's on-link
-	// delivery of the routed /64 reaches the VM (its address lives on the tap,
-	// not the uplink). Best-effort: the VM still boots if this fails, it just
-	// won't have v6 return traffic. del-then-add keeps it idempotent.
-	if d.prefix6 != nil && d.uplink6 != "" {
-		exec.CommandContext(ctx, "sysctl", "-qw", "net.ipv6.conf."+d.uplink6+".proxy_ndp=1").Run()             //nolint:errcheck
-		exec.CommandContext(ctx, "ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
-		exec.CommandContext(ctx, "ip", "-6", "neigh", "add", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
-	}
-	return nil
-}
-
-func (d *Driver) deleteTap(idx int) {
-	if d.opts.PrivilegedHelperSocket != "" {
-		// Helper cleanup is synchronized with the launch-client process exit.
-		return
-	}
-	if d.prefix6 != nil && d.uplink6 != "" {
-		exec.Command("ip", "-6", "neigh", "del", "proxy", d.guestIP6(idx), "dev", d.uplink6).Run() //nolint:errcheck
-	}
-	exec.Command("ip", "link", "del", tapName(idx)).Run() //nolint:errcheck
-}
-
-// defaultRoute6Dev returns the interface backing the IPv6 default route (e.g.
-// "enp65s0f0"), or "" if there is none. Used to place proxy-NDP entries for
-// guest addresses on the correct uplink.
-func defaultRoute6Dev() string {
-	out, err := exec.Command("ip", "-6", "route", "show", "default").Output()
-	if err != nil {
-		return ""
-	}
-	fields := strings.Fields(string(out))
-	for i, f := range fields {
-		if f == "dev" && i+1 < len(fields) {
-			return fields[i+1]
-		}
-	}
-	return ""
-}
-
-// macFor derives a stable locally-administered MAC from the network slot so
-// snapshots restore onto an identically-configured interface.
-func macFor(idx int) string {
-	return fmt.Sprintf("02:5b:00:00:%02x:%02x", (idx>>8)&0xff, idx&0xff)
 }
 
 func strPtr(s string) *string { return &s }

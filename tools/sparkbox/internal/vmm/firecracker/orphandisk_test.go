@@ -4,6 +4,7 @@ package firecracker
 
 import (
 	"context"
+	"github.com/vanpelt/sparky/tools/sparkbox/internal/vmm/hostnet"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -59,7 +60,7 @@ func TestDestroyReclaimsARootfsTheDriverHasNoRecordOf(t *testing.T) {
 func TestCreateRefusesToAdoptAStrayRootfsUnderANewName(t *testing.T) {
 	// A usable guest network so nothing incidental fails first: the refusal has
 	// to be what stops this create, not a driver that was too bare to get going.
-	d := &Driver{opts: Options{VMStateDir: t.TempDir()}, guestNet: guestnet.MustParse("")}
+	d := &Driver{opts: Options{VMStateDir: t.TempDir()}, net: hostnet.Plumbing{Net: guestnet.MustParse(""), TapPrefix: tapPrefix}}
 
 	stray := filepath.Join(d.vmDir("brave-otter"), "rootfs.ext4")
 	if err := os.MkdirAll(filepath.Dir(stray), 0o755); err != nil {
