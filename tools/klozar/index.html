@@ -204,6 +204,14 @@ textarea {
 }
 textarea::placeholder { color: var(--faint); font-style: italic; }
 
+/* --- the week's own notes --- */
+.pad { margin-top: 2rem; }
+.pad h2 { font-size: 1rem; }
+.pad textarea {
+  margin-top: .8rem; min-height: 3.6rem; overflow: hidden;   /* it grows to fit */
+  font-size: .98rem;
+}
+
 .more {
   display: block; width: 100%; margin-top: .7rem; text-align: center;
   border-style: dashed; color: var(--muted);
@@ -249,6 +257,14 @@ footer {
     <button id="clear-covered" type="button">Reset ticks</button>
     <span class="saving" id="saving"></span>
   </div>
+
+  <section class="pad">
+    <h2>Lesson notes</h2>
+    <p class="blurb">Anything that doesn’t belong to one sentence — homework, a rule
+      that finally landed, what to ask next week.</p>
+    <textarea id="week-note" aria-label="Notes for this week"
+      placeholder="Notes for the week…"></textarea>
+  </section>
 
   <main id="sections"></main>
 
@@ -297,9 +313,31 @@ footer {
 
   function status(text) { savingEl.textContent = text; }
 
+  // The week's own notes are just another entry in `state`, under a key no
+  // sentence id can collide with (ids are numeric). That buys the whole save
+  // discipline for free — the same coalescing, the same localStorage fallback,
+  // the same "don't clobber what's being typed" rule — instead of a second,
+  // subtly different copy of it. countCovered and "reset ticks" both look for
+  // real sentences, so neither notices it.
+  var WEEK_KEY = "__week__";
+  var padEl = document.getElementById("week-note");
+
   function entry(id) {
     if (!state[id]) state[id] = { note: "", covered: false };
     return state[id];
+  }
+
+  // A textarea that grows with its content: the pad sits above the sheet, so a
+  // fixed box would either waste the fold when empty or hide the notes when full.
+  function growPad() {
+    padEl.style.height = "auto";
+    padEl.style.height = padEl.scrollHeight + "px";
+  }
+
+  function showPad() {
+    if (padEl === document.activeElement) return;   // mid-sentence, leave it be
+    padEl.value = entry(WEEK_KEY).note;
+    growPad();
   }
 
   function saveLocal() {
@@ -330,6 +368,15 @@ footer {
         });
     };
     run();
+  }
+
+  function mergeWeek(note) {
+    if (inflight[WEEK_KEY] || queued[WEEK_KEY]) return;   // a newer write is out
+    var e = entry(WEEK_KEY);
+    if (e.note === (note || "")) return;
+    e.note = note || "";
+    saveLocal();
+    showPad();
   }
 
   function merge(rows) {
@@ -610,27 +657,43 @@ footer {
     return {
       save: function (id) {
         var e = entry(id);
+        var now = T(new Date().toISOString());
+        if (id === WEEK_KEY) {
+          return pipeline([{
+            sql: "insert into week_notes(week, note, updated_at) values(?,?,?) " +
+                 "on conflict(week) do update set " +
+                 "note=excluded.note, updated_at=excluded.updated_at",
+            args: [T(sheet.week), T(e.note || ""), now]
+          }]);
+        }
         return pipeline([{
           sql: "insert into notes(week, sentence_id, note, covered, updated_at) " +
                "values(?,?,?,?,?) on conflict(week, sentence_id) do update set " +
                "note=excluded.note, covered=excluded.covered, updated_at=excluded.updated_at",
-          args: [T(sheet.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0),
-                 T(new Date().toISOString())]
+          args: [T(sheet.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0), now]
         }]);
       },
+      // Both reads ride one pipeline: two round trips every 15s to say "nothing
+      // changed" is twice the free tier for no gain.
       load: function () {
-        return pipeline([{
-          sql: "select sentence_id, note, covered from notes where week = ?",
-          args: [T(sheet.week)]
-        }]).then(function (results) {
-          var rows = results[0].response.result.rows;
-          return rows.map(function (row) {
-            return {
-              id: row[0].value,
-              note: row[1].type === "null" ? "" : row[1].value,
-              covered: row[2].value === "1"
-            };
-          });
+        return pipeline([
+          { sql: "select sentence_id, note, covered from notes where week = ?",
+            args: [T(sheet.week)] },
+          { sql: "select note from week_notes where week = ?",
+            args: [T(sheet.week)] }
+        ]).then(function (results) {
+          var text = function (c) { return c.type === "null" ? "" : c.value; };
+          var padRows = results[1].response.result.rows;
+          return {
+            rows: results[0].response.result.rows.map(function (row) {
+              return {
+                id: row[0].value,
+                note: text(row[1]),
+                covered: row[2].value === "1"
+              };
+            }),
+            pad: padRows.length ? text(padRows[0][0]) : ""
+          };
         });
       }
     };
@@ -638,11 +701,18 @@ footer {
 
   function artifactBackend(db) {
     var items = function () { return db.collection("lessons/" + sheet.week + "/items"); };
+    var meta = function () { return db.collection("lessons/" + sheet.week + "/meta"); };
+    var dropped = function () {
+      sync = null;
+      status("Saving on this device");
+    };
     return {
       save: function (id) {
         var e = entry(id);
+        var at = new Date().toISOString();
+        if (id === WEEK_KEY) return meta().doc("notes").set({ note: e.note, at: at });
         return items().doc(String(id)).set({
-          note: e.note, covered: !!e.covered, at: new Date().toISOString()
+          note: e.note, covered: !!e.covered, at: at
         });
       },
       watch: function () {
@@ -651,10 +721,12 @@ footer {
             var b = d.data() || {};
             return { id: d.id, note: b.note || "", covered: !!b.covered };
           }));
-        }, function () {
-          sync = null;
-          status("Saving on this device");
-        });
+        }, dropped);
+        meta().onSnapshot(function (snap) {
+          snap.docs.forEach(function (d) {
+            if (d.id === "notes") mergeWeek((d.data() || {}).note || "");
+          });
+        }, dropped);
       }
     };
   }
@@ -665,8 +737,9 @@ footer {
       sync = tursoBackend(CONFIG.notes);
       var fetchNotes = function () {
         if (!sync) return;
-        sync.load().then(function (rows) {
-          merge(rows);
+        sync.load().then(function (got) {
+          merge(got.rows);
+          mergeWeek(got.pad);
           status("Shared");
         }).catch(function () { status("Saving on this device"); });
       };
@@ -756,6 +829,16 @@ footer {
 
     render();
     countCovered();
+    showPad();
+
+    // Same rule as a sentence note: one write per thought, not per letter.
+    padEl.addEventListener("input", growPad);
+    padEl.addEventListener("blur", function () {
+      var v = padEl.value.trim();
+      if (v === entry(WEEK_KEY).note) return;
+      entry(WEEK_KEY).note = v;
+      push(WEEK_KEY);
+    });
 
     var sortPick = document.getElementById("sort-pick");
     ORDERS.forEach(function (o) {
