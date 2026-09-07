@@ -103,7 +103,7 @@ button {
 }
 button:hover { border-color: var(--ink); }
 button[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-.weekpick {
+.pick {
   font-family: var(--slab); font-weight: 500; font-size: .78rem;
   color: var(--ink); background: var(--raised);
   border: 1px solid var(--rule); border-radius: 3px;
@@ -116,8 +116,8 @@ button[aria-pressed="true"] { background: var(--ink); color: var(--paper); borde
   background-size: .3rem .3rem, .3rem .3rem;
   background-repeat: no-repeat;
 }
-.weekpick:hover { border-color: var(--ink); }
-.weekpick[hidden] { display: none; }
+.pick:hover { border-color: var(--ink); }
+.pick[hidden] { display: none; }
 .saving {
   margin-left: auto; font-family: var(--slab); font-size: .7rem;
   letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
@@ -193,6 +193,16 @@ textarea {
 }
 textarea::placeholder { color: var(--faint); font-style: italic; }
 
+.more {
+  display: block; width: 100%; margin-top: .7rem; text-align: center;
+  border-style: dashed; color: var(--muted);
+}
+.empty {
+  color: var(--muted); font-style: italic; margin: 2.5rem 0 0;
+  padding: 1.1rem; border: 1px dashed var(--rule); border-radius: 3px;
+  text-align: center;
+}
+
 /* --- word list --- */
 .words { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: 1.1rem; }
 .words span {
@@ -219,8 +229,10 @@ footer {
   </header>
 
   <div class="controls">
-    <select id="week-pick" class="weekpick" aria-label="Week to view" hidden></select>
-    <button id="toggle-en" type="button" aria-pressed="false">Hide translations</button>
+    <select id="week-pick" class="pick" aria-label="Week to view" hidden></select>
+    <select id="sort-pick" class="pick" aria-label="Order sentences by"></select>
+    <button id="starred-only" type="button" aria-pressed="false">★ Starred only</button>
+    <button id="toggle-en" type="button" aria-pressed="false">Hide English</button>
     <button id="clear-covered" type="button">Reset ticks</button>
     <span class="saving" id="saving"></span>
   </div>
@@ -249,6 +261,26 @@ footer {
   var sheet, KEY, state = {}, pageIds = {}, sync = null;
   var inflight = {}, queued = {};
   var savingEl = document.getElementById("saving");
+
+  // How the sheet is read — the ordering and the starred filter — is a habit,
+  // not a property of any one week. It lives under its own key so switching
+  // weeks keeps it, and so it never rides along with the notes that sync.
+  var PREFS_KEY = "klozar:prefs";
+  var prefs = { order: "mix", starred: false };
+  try {
+    var saved = JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") || {};
+    if (saved.order) prefs.order = saved.order;
+    prefs.starred = !!saved.starred;
+  } catch (e) { /* private window — the defaults are fine */ }
+
+  function savePrefs() {
+    try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+  }
+
+  // Which sections the reader has opened past the fold, by index. Deliberately
+  // survives a re-sort: having asked to see everything, you should not lose the
+  // rows again just because you changed the order they are in.
+  var expanded = {};
 
   function status(text) { savingEl.textContent = text; }
 
@@ -326,6 +358,45 @@ footer {
     return String(text || "").replace(/\{\{(.+?)\}\}/g, "$1");
   }
 
+  // --- ordering ---------------------------------------------------------
+  //
+  // The same blend klozar.py ranks with, restated because the page re-sorts
+  // client-side: mostly how badly the sentence went, tempered by how recent it
+  // is, with a nudge for anything starred by hand. Keep the weights in step
+  // with BLEND in klozar.py or the sheet opens in an order it then contradicts.
+  var W = { miss: 0.55, recency: 0.30, star: 0.15 };
+  var newest = 0, spanDays = 7;   // both set per sheet in start()
+
+  // Parsed as UTC: a local-midnight parse shifts whole days either side of the
+  // date line, which is enough to reorder a week.
+  function day(s) { return Date.parse((s || "1970-01-01") + "T00:00:00Z"); }
+  function rate(s) { return s.played ? s.missed / s.played : 0; }
+
+  function blend(s) {
+    var age = (newest - day(s.last)) / 86400000;
+    var recency = Math.max(0, 1 - age / Math.max(spanDays, 1));
+    return W.miss * rate(s) + W.recency * recency + W.star * (s.favorited ? 1 : 0);
+  }
+
+  var ORDERS = [
+    { key: "mix", label: "Worst & freshest", cmp: function (a, b) {
+        return blend(b) - blend(a) || b.missed - a.missed || day(b.last) - day(a.last);
+      } },
+    { key: "recent", label: "Most recent", cmp: function (a, b) {
+        return day(b.last) - day(a.last) || blend(b) - blend(a);
+      } },
+    { key: "missed", label: "Worst miss rate", cmp: function (a, b) {
+        return rate(b) - rate(a) || b.missed - a.missed || day(b.last) - day(a.last);
+      } }
+  ];
+
+  function order() {
+    for (var i = 0; i < ORDERS.length; i++) {
+      if (ORDERS[i].key === prefs.order) return ORDERS[i];
+    }
+    return ORDERS[0];
+  }
+
   function rowEl(s) {
     var e = entry(s.id);
     var row = document.createElement("div");
@@ -387,9 +458,20 @@ footer {
 
   function render() {
     var host = document.getElementById("sections");
+    var cmp = order().cmp;
+    var limit = sheet.limit || 25;
+    var total = 0;
     host.textContent = "";
-    sheet.sections.forEach(function (sec) {
-      if (!sec.items.length) return;
+    sheet.sections.forEach(function (sec, i) {
+      var items = prefs.starred
+        ? sec.items.filter(function (s) { return s.favorited; })
+        : sec.items;
+      if (!items.length) return;
+      // slice() because sec.items is the sheet's own array when nothing is
+      // filtered out, and sort() would reorder it in place.
+      items = items.slice().sort(cmp);
+      total += items.length;
+
       var el = document.createElement("section");
       var head = document.createElement("h2");
       head.textContent = sec.title;
@@ -398,12 +480,38 @@ footer {
       blurb.textContent = sec.blurb;
       var rows = document.createElement("div");
       rows.className = "rows";
-      sec.items.forEach(function (s) { rows.appendChild(rowEl(s)); });
+      var cut = expanded[i] ? items.length : Math.min(limit, items.length);
+      items.slice(0, cut).forEach(function (s) { rows.appendChild(rowEl(s)); });
       el.appendChild(head);
       el.appendChild(blurb);
       el.appendChild(rows);
+
+      // Every matching sentence is in the data; a section just opens on the
+      // first `limit` of them so the top of the current order is the top of
+      // the page rather than row 40 of a scroll.
+      if (items.length > limit) {
+        var more = document.createElement("button");
+        more.className = "more";
+        more.type = "button";
+        more.textContent = expanded[i]
+          ? "Show fewer" : "Show all " + items.length;
+        more.addEventListener("click", function () {
+          expanded[i] = !expanded[i];
+          render();
+        });
+        el.appendChild(more);
+      }
       host.appendChild(el);
     });
+
+    if (!total) {
+      var none = document.createElement("p");
+      none.className = "empty";
+      none.textContent = prefs.starred
+        ? "Nothing starred in this week — turn the filter off to see the rest."
+        : "Nothing practiced in this window.";
+      host.appendChild(none);
+    }
 
     if (sheet.words.length) {
       var el = document.createElement("section");
@@ -585,8 +693,18 @@ footer {
       state = {};
     }
     pageIds = {};
+    // Recency is measured from the newest day *in the sheet*, not from today,
+    // so an old week reopened in December still ranks the way it did when it
+    // was pulled instead of collapsing to "everything is ancient".
+    newest = 0;
+    spanDays = sheet.days || 7;
+    expanded = {};
     sheet.sections.forEach(function (sec) {
-      sec.items.forEach(function (item) { pageIds[item.id] = true; });
+      sec.items.forEach(function (item) {
+        pageIds[item.id] = true;
+        var d = day(item.last);
+        if (d > newest) newest = d;
+      });
     });
 
     document.getElementById("eyebrow").textContent = sheet.eyebrow;
@@ -600,12 +718,35 @@ footer {
     render();
     countCovered();
 
+    var sortPick = document.getElementById("sort-pick");
+    ORDERS.forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o.key;
+      opt.textContent = o.label;
+      opt.selected = o.key === prefs.order;
+      sortPick.appendChild(opt);
+    });
+    sortPick.addEventListener("change", function () {
+      prefs.order = sortPick.value;
+      savePrefs();
+      render();
+    });
+
+    var starBtn = document.getElementById("starred-only");
+    starBtn.setAttribute("aria-pressed", String(prefs.starred));
+    starBtn.addEventListener("click", function () {
+      prefs.starred = !prefs.starred;
+      starBtn.setAttribute("aria-pressed", String(prefs.starred));
+      savePrefs();
+      render();
+    });
+
     var toggle = document.getElementById("toggle-en");
     toggle.addEventListener("click", function () {
       var on = toggle.getAttribute("aria-pressed") === "true";
       toggle.setAttribute("aria-pressed", String(!on));
       document.body.classList.toggle("hidden-en", !on);
-      toggle.textContent = on ? "Hide translations" : "Show translations";
+      toggle.textContent = on ? "Hide English" : "Show English";
     });
 
     document.getElementById("clear-covered").addEventListener("click", function () {

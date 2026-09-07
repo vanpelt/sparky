@@ -205,6 +205,48 @@ def plain(sentence: dict) -> str:
     return CLOZE.sub(r"\1", sentence.get("text") or "")
 
 
+# Miss rate alone is a blunt instrument: half the week sits at "1 of 2", and a
+# sentence fumbled six days ago has usually been re-drilled since. The default
+# order blends three things instead — how badly it went, how recently, and a
+# nudge for anything starred by hand. The page carries the same formula in JS so
+# the ordering the sheet opens with is the one this produced; keep the two in
+# step if you change the weights.
+BLEND = {"miss": 0.55, "recency": 0.30, "star": 0.15}
+
+
+def miss_rate(s: dict) -> float:
+    return s.get("numIncorrect", 0) / max(s.get("numPlayed", 0), 1)
+
+
+def blend_score(s: dict, newest: date, days: int) -> float:
+    try:
+        age = (newest - date.fromisoformat(s.get("lastPlayedDate") or "")).days
+    except ValueError:
+        age = days
+    recency = max(0.0, 1 - age / max(days, 1))
+    return (BLEND["miss"] * miss_rate(s)
+            + BLEND["recency"] * recency
+            + BLEND["star"] * bool(s.get("favorited")))
+
+
+def by_blend(items: list[dict], days: int) -> list[dict]:
+    """Sorted by the blend, ties broken on miss count then recency.
+
+    Age is measured from the newest day *in the set*, not from today, so a sheet
+    re-read in December still ranks the week it covers the way it did when it
+    was pulled.
+    """
+    if not items:
+        return []
+    stamps = [s["lastPlayedDate"] for s in items if s.get("lastPlayedDate")]
+    newest = date.fromisoformat(max(stamps)) if stamps else date.today()
+    # Pre-sort on date so the stable sort below leaves recency as the last
+    # tiebreak, which is where it belongs.
+    out = sorted(items, key=lambda s: s.get("lastPlayedDate") or "", reverse=True)
+    out.sort(key=lambda s: (-blend_score(s, newest, days), -s.get("numIncorrect", 0)))
+    return out
+
+
 def collect_week(cm: Clozemaster, days: int) -> dict:
     """Everything played in the last `days`, grouped by how it went."""
     dash = cm.dashboard()
@@ -219,24 +261,11 @@ def collect_week(cm: Clozemaster, days: int) -> dict:
                 s["_collection"] = collection["name"]
                 played.append(s)
 
-    def miss_rate(s):
-        return s.get("numIncorrect", 0) / max(s.get("numPlayed", 0), 1)
-
-    # Miss rate ties are common (half the week sits at "1 of 2"), so break them
-    # on recency — a sentence missed yesterday is worth more of a tutor's time
-    # than the same sentence missed six days ago.
-    struggles = sorted(played, key=lambda s: s.get("lastPlayedDate") or "", reverse=True)
-    struggles = [s for s in struggles if s.get("numIncorrect", 0) > 0]
-    struggles.sort(key=lambda s: (-miss_rate(s), -s.get("numIncorrect", 0)))
+    struggles = by_blend([s for s in played if s.get("numIncorrect", 0) > 0], days)
     # No creation timestamp is exposed, so "new" is inferred: seen at most twice
     # and last seen inside the window means it almost certainly started here.
-    # Newest first, or a --limit cut only ever shows the oldest day of the week.
-    fresh = sorted(
-        (s for s in played if s.get("numPlayed", 0) <= 2),
-        key=lambda s: s.get("lastPlayedDate") or "",
-        reverse=True,
-    )
-    starred = [s for s in played if s.get("favorited")]
+    fresh = by_blend([s for s in played if s.get("numPlayed", 0) <= 2], days)
+    starred = by_blend([s for s in played if s.get("favorited")], days)
 
     words = Counter(answer_of(s).lower() for s in played if answer_of(s))
 
@@ -353,8 +382,14 @@ def sheet_data(week: dict, limit: int) -> dict:
     """
     today = date.today()
     start = date.fromisoformat(week["cutoff"])
+    # Every matching sentence ships, not just the top `limit`. The page re-orders
+    # client-side, and a list pre-cut by one ordering makes every other ordering
+    # a lie — "most recent" over the 25 worst is not the most recent. `limit` is
+    # how many rows a section opens with; the rest are behind "show all".
     return {
         "week": today.isoformat(),
+        "days": week["days"],
+        "limit": limit,
         "eyebrow": f"Week of {start:%-d %B} – {today:%-d %B %Y}",
         "title": "Serbian lesson sheet",
         "counts": {
@@ -364,15 +399,15 @@ def sheet_data(week: dict, limit: int) -> dict:
         },
         "sections": [
             {"title": "Gave me trouble",
-             "blurb": "Ranked by how often I got them wrong. The heavier the red edge, "
+             "blurb": "Everything I got wrong this week. The heavier the red edge, "
                       "the worse the ratio. This is the list worth the hour.",
-             "items": [as_item(s) for s in week["struggles"][:limit]]},
+             "items": [as_item(s) for s in week["struggles"]]},
             {"title": "Starred this week",
              "blurb": "Flagged in the app while playing.",
              "items": [as_item(s) for s in week["starred"]]},
             {"title": "New this week",
              "blurb": "Inferred first encounters — seen twice or fewer. Still fragile.",
-             "items": [as_item(s) for s in week["fresh"][:limit]]},
+             "items": [as_item(s) for s in week["fresh"]]},
         ],
         "words": [w for w, n in week["words"].most_common(30) if n > 1],
         "stamp": f"Pulled {today:%-d %B %Y} for {week['user'].get('username')}",
@@ -416,7 +451,8 @@ def render(week: dict, limit: int) -> str:
         "",
         "## Gave me trouble",
         "",
-        "Ranked by how often I got them wrong. This is the list worth talking through.",
+        "Ranked on how badly it went, how recently, and whether I starred it. "
+        "This is the list worth talking through.",
         "",
     ]
     md += [entry(s) for s in week["struggles"][:limit]] or ["_Clean week — nothing missed._"]
@@ -455,7 +491,8 @@ def main():
 
     art = sub.add_parser("artifact", help="interactive HTML sheet, ready to publish")
     art.add_argument("--days", type=int, default=7)
-    art.add_argument("--limit", type=int, default=25, help="entries per section")
+    art.add_argument("--limit", type=int, default=25,
+                     help="rows a section opens with; the rest are behind “show all”")
     art.add_argument("--out", type=Path, help="default: out/<date>-serbian-lesson.html")
 
     snap = sub.add_parser("snapshot", help="raw per-sentence JSON")
@@ -465,7 +502,8 @@ def main():
 
     site = sub.add_parser("site", help="write the sheet into the GitHub Pages tree")
     site.add_argument("--days", type=int, default=7)
-    site.add_argument("--limit", type=int, default=25, help="entries per section")
+    site.add_argument("--limit", type=int, default=25,
+                     help="rows a section opens with; the rest are behind “show all”")
     site.add_argument("--out", type=Path, help="default: index.html beside this script")
     site.add_argument("--no-notes", action="store_true",
                       help="omit the shared-notes store; notes stay per-device")
