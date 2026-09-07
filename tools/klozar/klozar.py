@@ -346,6 +346,61 @@ def notes_backend() -> dict | None:
     return {"url": data["url"].rstrip("/"), "token": data["token"]}
 
 
+# --- how far back to look ---------------------------------------------------
+#
+# Lessons are not weekly. Sometimes there are two in a week, sometimes a fortnight
+# goes by, and a fixed 7 days either re-shows what the last sheet already covered
+# or drops the middle of a long gap. The manifest is the record of when sheets
+# were made, and a sheet is made per lesson, so the previous entry is the best
+# available answer to "when did we last do this".
+#
+# It is a proxy, not a log: rebuild the sheet twice in one day for some other
+# reason and the next window shrinks accordingly. `--days` overrides it.
+
+DEFAULT_DAYS = 7
+MAX_DAYS = 14
+
+
+def previous_sheet(root: Path, today: date) -> date | None:
+    """The newest sheet that isn't today's — today's own entry would measure zero."""
+    path = root / "weeks.json"
+    if not path.exists():
+        return None
+    try:
+        weeks = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    stamps = sorted({w.get("week") for w in weeks if w.get("week")}, reverse=True)
+    for stamp in stamps:
+        try:
+            when = date.fromisoformat(stamp)
+        except ValueError:
+            continue
+        if when < today:
+            return when
+    return None
+
+
+def plural_days(n: int) -> str:
+    return f"{n} day" if n == 1 else f"{n} days"
+
+
+def window(root: Path, days: int | None, cap: int) -> tuple[int, str]:
+    """Days to look back, and the reason — printed, because it is now a guess."""
+    if days is not None:
+        return days, f"{plural_days(days)} (asked for)"
+    today = date.today()
+    last = previous_sheet(root, today)
+    if last is None:
+        fallback = min(DEFAULT_DAYS, cap)
+        return fallback, f"{plural_days(fallback)} (no earlier sheet to measure from)"
+    span = (today - last).days
+    if span > cap:
+        return cap, (f"{plural_days(cap)} (capped — the last sheet was "
+                     f"{plural_days(span)} ago, on {last})")
+    return span, f"{plural_days(span)} (since the sheet of {last})"
+
+
 def update_manifest(root: Path, week: dict, entry_label: str) -> list[dict]:
     """Upsert this week into weeks.json, newest first.
 
@@ -364,6 +419,7 @@ def update_manifest(root: Path, week: dict, entry_label: str) -> list[dict]:
     weeks.append({
         "week": stamp,
         "label": entry_label,
+        "days": week["days"],
         "played": len(week["played"]),
         "missed": len(week["struggles"]),
         "starred": len(week["starred"]),
@@ -390,7 +446,7 @@ def sheet_data(week: dict, limit: int) -> dict:
         "week": today.isoformat(),
         "days": week["days"],
         "limit": limit,
-        "eyebrow": f"Week of {start:%-d %B} – {today:%-d %B %Y}",
+        "eyebrow": f"{start:%-d %B} – {today:%-d %B %Y}",
         "title": "Serbian lesson sheet",
         "counts": {
             "played": len(week["played"]),
@@ -444,9 +500,10 @@ def render(week: dict, limit: int) -> str:
     today = date.today()
     start = date.fromisoformat(week["cutoff"])
     md = [
-        f"# Serbian — week of {start:%-d %b} to {today:%-d %b %Y}",
+        f"# Serbian — {start:%-d %b} to {today:%-d %b %Y}",
         "",
-        f"{len(week['played'])} sentences practiced over {week['days']} days · "
+        f"{len(week['played'])} sentences practiced over {week['days']} day"
+        f"{'' if week['days'] == 1 else 's'} · "
         f"{len(week['struggles'])} tripped me up · {len(week['starred'])} starred.",
         "",
         "## Gave me trouble",
@@ -484,13 +541,19 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     lesson = sub.add_parser("lesson", help="weekly markdown lesson sheet")
-    lesson.add_argument("--days", type=int, default=7)
+    lesson.add_argument("--days", type=int, default=None,
+                        help="override the automatic window; default is since the previous sheet")
+    lesson.add_argument("--max-days", type=int, default=MAX_DAYS,
+                        help="ceiling on the automatic window")
     lesson.add_argument("--limit", type=int, default=25, help="entries per section")
     lesson.add_argument("--out", type=Path, help="default: out/<date>-serbian-lesson.md")
     lesson.add_argument("--stdout", action="store_true", help="print instead of writing")
 
     art = sub.add_parser("artifact", help="interactive HTML sheet, ready to publish")
-    art.add_argument("--days", type=int, default=7)
+    art.add_argument("--days", type=int, default=None,
+                        help="override the automatic window; default is since the previous sheet")
+    art.add_argument("--max-days", type=int, default=MAX_DAYS,
+                        help="ceiling on the automatic window")
     art.add_argument("--limit", type=int, default=25,
                      help="rows a section opens with; the rest are behind “show all”")
     art.add_argument("--out", type=Path, help="default: out/<date>-serbian-lesson.html")
@@ -501,7 +564,10 @@ def main():
     snap.add_argument("--out", type=Path, help="default: out/<date>-snapshot.json")
 
     site = sub.add_parser("site", help="write the sheet into the GitHub Pages tree")
-    site.add_argument("--days", type=int, default=7)
+    site.add_argument("--days", type=int, default=None,
+                        help="override the automatic window; default is since the previous sheet")
+    site.add_argument("--max-days", type=int, default=MAX_DAYS,
+                        help="ceiling on the automatic window")
     site.add_argument("--limit", type=int, default=25,
                      help="rows a section opens with; the rest are behind “show all”")
     site.add_argument("--out", type=Path, help="default: index.html beside this script")
@@ -560,7 +626,9 @@ def main():
         return
 
     if args.cmd == "artifact":
-        week = collect_week(cm, args.days)
+        days, why = window(HERE, args.days, args.max_days)
+        print(f"Looking back {why}.")
+        week = collect_week(cm, days)
         out = args.out or out_dir / f"{date.today()}-serbian-lesson.html"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(render_html(sheet_data(week, args.limit)), encoding="utf-8")
@@ -570,11 +638,13 @@ def main():
         return
 
     if args.cmd == "site":
-        week = collect_week(cm, args.days)
+        root = args.out.parent if args.out else HERE
+        days, why = window(root, args.days, args.max_days)
+        print(f"Looking back {why}.")
+        week = collect_week(cm, days)
         # Only the published page gets the shared store; inside an artifact the
         # CSP blocks the fetch anyway, and that copy uses claude.use("db").
         notes = None if args.no_notes else notes_backend()
-        root = args.out.parent if args.out else HERE
         sheet = sheet_data(week, args.limit)
         label = f"{date.fromisoformat(week['cutoff']):%-d %b} – {date.today():%-d %b %Y}"
         update_manifest(root, week, label)
@@ -601,7 +671,9 @@ def main():
               "https://vanpelt.github.io/sparky/tools/klozar/")
         return
 
-    week = collect_week(cm, args.days)
+    days, why = window(HERE, args.days, args.max_days)
+    print(f"Looking back {why}.", file=sys.stderr)
+    week = collect_week(cm, days)
     md = render(week, args.limit)
     cm.persist()
     if args.stdout:

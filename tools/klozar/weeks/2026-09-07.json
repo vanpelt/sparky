@@ -1,13 +1,13 @@
 {
  "week": "2026-09-07",
- "days": 7,
+ "days": 4,
  "limit": 25,
- "eyebrow": "Week of 31 August – 7 September 2026",
+ "eyebrow": "3 September – 7 September 2026",
  "title": "Serbian lesson sheet",
  "counts": {
-  "played": 292,
-  "missed": 85,
-  "starred": 47
+  "played": 166,
+  "missed": 51,
+  "starred": 40
  },
  "sections": [
   {
@@ -25,16 +25,6 @@
      "last": "2026-09-07"
     },
     {
-     "id": 13294869,
-     "text": "Ovo se nikad nije {{dogodilo}}.",
-     "translation": "This never happened.",
-     "level": 0,
-     "played": 3,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
      "id": 13294832,
      "text": "On se {{bavi}} jogom.",
      "translation": "He does yoga.",
@@ -43,16 +33,6 @@
      "missed": 2,
      "favorited": true,
      "last": "2026-09-07"
-    },
-    {
-     "id": 13295160,
-     "text": "Majk se {{smeje}} svim mojim šalama.",
-     "translation": "Mike laughs at all my jokes.",
-     "level": 1,
-     "played": 3,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-03"
     },
     {
      "id": 13295126,
@@ -75,11 +55,11 @@
      "last": "2026-09-06"
     },
     {
-     "id": 13295088,
-     "text": "Prošetaj {{duž}} ivice parka.",
-     "translation": "Walk along the edge of the park.",
-     "level": 1,
-     "played": 4,
+     "id": 13294869,
+     "text": "Ovo se nikad nije {{dogodilo}}.",
+     "translation": "This never happened.",
+     "level": 0,
+     "played": 3,
      "missed": 2,
      "favorited": true,
      "last": "2026-09-04"
@@ -125,22 +105,22 @@
      "last": "2026-09-07"
     },
     {
-     "id": 13295153,
-     "text": "Šta će se {{dogoditi}} ako pritisnem ovo dugme?",
-     "translation": "What happens if I press this button?",
+     "id": 13294761,
+     "text": "Često {{govore}} zdravo.",
+     "translation": "They often say hello.",
      "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
+     "played": 7,
+     "missed": 3,
+     "favorited": false,
+     "last": "2026-09-07"
     },
     {
-     "id": 13295163,
-     "text": "{{Moguće}} je da ćemo doći kasno.",
-     "translation": "It's possible we'll arrive late.",
+     "id": 13295160,
+     "text": "Majk se {{smeje}} svim mojim šalama.",
+     "translation": "Mike laughs at all my jokes.",
      "level": 1,
-     "played": 2,
-     "missed": 1,
+     "played": 3,
+     "missed": 2,
      "favorited": true,
      "last": "2026-09-03"
     },
@@ -165,36 +145,6 @@
      "last": "2026-09-06"
     },
     {
-     "id": 13294797,
-     "text": "Ja mu {{pomažem}}.",
-     "translation": "I help him.",
-     "level": 1,
-     "played": 5,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295086,
-     "text": "Da li {{neko}} ima olovku?",
-     "translation": "Does anybody have a pen?",
-     "level": 0,
-     "played": 3,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13294761,
-     "text": "Često {{govore}} zdravo.",
-     "translation": "They often say hello.",
-     "level": 1,
-     "played": 7,
-     "missed": 3,
-     "favorited": false,
-     "last": "2026-09-07"
-    },
-    {
      "id": 13295100,
      "text": "Čujem te {{jasno}}.",
      "translation": "I hear you clearly.",
@@ -203,6 +153,16 @@
      "missed": 2,
      "favorited": false,
      "last": "2026-09-06"
+    },
+    {
+     "id": 13295088,
+     "text": "Prošetaj {{duž}} ivice parka.",
+     "translation": "Walk along the edge of the park.",
+     "level": 1,
+     "played": 4,
+     "missed": 2,
+     "favorited": true,
+     "last": "2026-09-04"
     },
     {
      "id": 13295171,
@@ -225,24 +185,14 @@
      "last": "2026-09-06"
     },
     {
-     "id": 13295033,
-     "text": "Izgledaš {{drugačije}}.",
-     "translation": "You look different.",
-     "level": 1,
-     "played": 4,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294861,
-     "text": "Budi {{ljubazna}} osoba.",
-     "translation": "Be a kind person.",
+     "id": 13295125,
+     "text": "U biblioteci je obično {{tiho}}.",
+     "translation": "The library is usually quiet.",
      "level": 2,
-     "played": 6,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-04"
+     "played": 3,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-07"
     },
     {
      "id": 13294879,
@@ -255,14 +205,14 @@
      "last": "2026-09-06"
     },
     {
-     "id": 13295125,
-     "text": "U biblioteci je obično {{tiho}}.",
-     "translation": "The library is usually quiet.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-07"
+     "id": 13294797,
+     "text": "Ja mu {{pomažem}}.",
+     "translation": "I help him.",
+     "level": 1,
+     "played": 5,
+     "missed": 2,
+     "favorited": true,
+     "last": "2026-09-04"
     },
     {
      "id": 13294978,
@@ -271,6 +221,156 @@
      "level": 1,
      "played": 5,
      "missed": 2,
+     "favorited": false,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13295086,
+     "text": "Da li {{neko}} ima olovku?",
+     "translation": "Does anybody have a pen?",
+     "level": 0,
+     "played": 3,
+     "missed": 2,
+     "favorited": false,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13294801,
+     "text": "Fudbalski tim mog sina je {{pobedio}} na utakmici.",
+     "translation": "My son's football team won the game.",
+     "level": 3,
+     "played": 4,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-07"
+    },
+    {
+     "id": 13294820,
+     "text": "Čekala je {{dugo}}.",
+     "translation": "She's been waiting for a long time.",
+     "level": 1,
+     "played": 4,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-07"
+    },
+    {
+     "id": 13295153,
+     "text": "Šta će se {{dogoditi}} ako pritisnem ovo dugme?",
+     "translation": "What happens if I press this button?",
+     "level": 1,
+     "played": 2,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295163,
+     "text": "{{Moguće}} je da ćemo doći kasno.",
+     "translation": "It's possible we'll arrive late.",
+     "level": 1,
+     "played": 2,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13294791,
+     "text": "Da li imaš {{neka}} pitanja?",
+     "translation": "Do you have any questions?",
+     "level": 3,
+     "played": 5,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-07"
+    },
+    {
+     "id": 13294861,
+     "text": "Budi {{ljubazna}} osoba.",
+     "translation": "Be a kind person.",
+     "level": 2,
+     "played": 6,
+     "missed": 2,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13295094,
+     "text": "Njoj je {{potrebna}} pomoć.",
+     "translation": "She needs help.",
+     "level": 2,
+     "played": 3,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13295101,
+     "text": "Ovo je moja {{kancelarija}}.",
+     "translation": "This is my office.",
+     "level": 2,
+     "played": 3,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13294785,
+     "text": "Ja sam to {{rekao}}.",
+     "translation": "I said that.",
+     "level": 1,
+     "played": 4,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13294839,
+     "text": "Možeš da {{ostaneš}}.",
+     "translation": "You can stay.",
+     "level": 1,
+     "played": 4,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13294985,
+     "text": "Moram da {{promenim}} planove.",
+     "translation": "I need to change my plans.",
+     "level": 2,
+     "played": 4,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13294783,
+     "text": "Moj telefon je {{isključen}}.",
+     "translation": "My phone is off.",
+     "level": 1,
+     "played": 6,
+     "missed": 3,
+     "favorited": false,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13294755,
+     "text": "Ona je {{imala}} lep osmeh.",
+     "translation": "She had a beautiful smile.",
+     "level": 2,
+     "played": 5,
+     "missed": 1,
+     "favorited": false,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13294766,
+     "text": "Ona voli da {{pravi}} hleb.",
+     "translation": "She likes to make bread.",
+     "level": 3,
+     "played": 5,
+     "missed": 1,
      "favorited": false,
      "last": "2026-09-06"
     },
@@ -315,94 +415,14 @@
      "last": "2026-09-03"
     },
     {
-     "id": 13294785,
-     "text": "Ja sam to {{rekao}}.",
-     "translation": "I said that.",
-     "level": 1,
-     "played": 4,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295332,
-     "text": "Uradio je to samo {{zbog}} mene.",
-     "translation": "He did it only for my sake.",
-     "level": 1,
+     "id": 13294968,
+     "text": "Probudio se {{kasno}} za posao.",
+     "translation": "He woke up late for work.",
+     "level": 2,
      "played": 5,
      "missed": 2,
-     "favorited": true,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294783,
-     "text": "Moj telefon je {{isključen}}.",
-     "translation": "My phone is off.",
-     "level": 1,
-     "played": 6,
-     "missed": 3,
      "favorited": false,
      "last": "2026-09-04"
-    },
-    {
-     "id": 13295094,
-     "text": "Njoj je {{potrebna}} pomoć.",
-     "translation": "She needs help.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13295101,
-     "text": "Ovo je moja {{kancelarija}}.",
-     "translation": "This is my office.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13294801,
-     "text": "Fudbalski tim mog sina je {{pobedio}} na utakmici.",
-     "translation": "My son's football team won the game.",
-     "level": 3,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-07"
-    },
-    {
-     "id": 13294820,
-     "text": "Čekala je {{dugo}}.",
-     "translation": "She's been waiting for a long time.",
-     "level": 1,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-07"
-    },
-    {
-     "id": 13295017,
-     "text": "Ja sam {{protiv}} rata.",
-     "translation": "I am against war.",
-     "level": 1,
-     "played": 5,
-     "missed": 3,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294791,
-     "text": "Da li imaš {{neka}} pitanja?",
-     "translation": "Do you have any questions?",
-     "level": 3,
-     "played": 5,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-07"
     },
     {
      "id": 13295045,
@@ -425,36 +445,6 @@
      "last": "2026-09-03"
     },
     {
-     "id": 13294839,
-     "text": "Možeš da {{ostaneš}}.",
-     "translation": "You can stay.",
-     "level": 1,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13294985,
-     "text": "Moram da {{promenim}} planove.",
-     "translation": "I need to change my plans.",
-     "level": 2,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13294968,
-     "text": "Probudio se {{kasno}} za posao.",
-     "translation": "He woke up late for work.",
-     "level": 2,
-     "played": 5,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-04"
-    },
-    {
      "id": 13294769,
      "text": "Plače {{jer}} je izgubio.",
      "translation": "He is crying because he lost.",
@@ -475,96 +465,6 @@
      "last": "2026-09-03"
     },
     {
-     "id": 13295005,
-     "text": "Ja sam {{oženjen}} brazilkom.",
-     "translation": "I am married to a Brazilian woman.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295011,
-     "text": "Odlučili su da se {{tuku}}.",
-     "translation": "They decided to fight.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295001,
-     "text": "Ona me {{čini}} srećnim.",
-     "translation": "She makes me happy.",
-     "level": 1,
-     "played": 5,
-     "missed": 3,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294755,
-     "text": "Ona je {{imala}} lep osmeh.",
-     "translation": "She had a beautiful smile.",
-     "level": 2,
-     "played": 5,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13294766,
-     "text": "Ona voli da {{pravi}} hleb.",
-     "translation": "She likes to make bread.",
-     "level": 3,
-     "played": 5,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13295015,
-     "text": "Ona je pala i {{povredila}} koleno.",
-     "translation": "She fell and hurt her knee.",
-     "level": 1,
-     "played": 4,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295141,
-     "text": "{{Kladio}} sam se na tim.",
-     "translation": "I made a bet on the team.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295145,
-     "text": "Znam ovaj {{zvuk}}.",
-     "translation": "I know that sound.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295151,
-     "text": "{{Konačno}} sam dobio posao.",
-     "translation": "I finally got a job.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
      "id": 13295084,
      "text": "Oni pomažu {{siromašnim}} ljudima.",
      "translation": "They help poor people.",
@@ -573,46 +473,6 @@
      "missed": 1,
      "favorited": false,
      "last": "2026-09-04"
-    },
-    {
-     "id": 13294998,
-     "text": "Zaboravio sam najbolji {{deo}}.",
-     "translation": "I forgot the best part.",
-     "level": 1,
-     "played": 4,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295009,
-     "text": "Torta je {{prilično}} dobra.",
-     "translation": "The cake is quite good.",
-     "level": 1,
-     "played": 4,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295133,
-     "text": "Zna {{zakon}}.",
-     "translation": "He knows the law.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295137,
-     "text": "Sinoć sam sanjao čudan {{san}}.",
-     "translation": "I had a strange dream last night.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
     },
     {
      "id": 13294803,
@@ -645,16 +505,6 @@
      "last": "2026-09-04"
     },
     {
-     "id": 13294946,
-     "text": "{{Svako}} to može da uradi.",
-     "translation": "Anyone can do it.",
-     "level": 2,
-     "played": 5,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
      "id": 13295314,
      "text": "Ne idi osim {{ako}} se ne osećaš dobro.",
      "translation": "Don't go unless you feel well.",
@@ -673,196 +523,6 @@
      "missed": 1,
      "favorited": false,
      "last": "2026-09-04"
-    },
-    {
-     "id": 13294715,
-     "text": "Ona voli da slika {{ali}} mrzi da crta.",
-     "translation": "She loves painting but hates drawing.",
-     "level": 2,
-     "played": 6,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295024,
-     "text": "Gde su {{dečaci}}?",
-     "translation": "Where are the boys?",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295025,
-     "text": "On {{pohađa}} časove umetnosti.",
-     "translation": "He is taking an art class.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295030,
-     "text": "Ne smeš da {{stojiš}} na stolu.",
-     "translation": "You cannot stand on the table.",
-     "level": 1,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294848,
-     "text": "Da li si {{čuo}} to?",
-     "translation": "Did you hear it?",
-     "level": 1,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294775,
-     "text": "Ovo je {{put}} do parka.",
-     "translation": "This is the way to the park.",
-     "level": 3,
-     "played": 5,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294930,
-     "text": "Ja {{koristim}} olovku za pisanje.",
-     "translation": "I use a pen to write.",
-     "level": 2,
-     "played": 5,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294932,
-     "text": "Radite {{naporno}}.",
-     "translation": "You work hard.",
-     "level": 2,
-     "played": 5,
-     "missed": 2,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294994,
-     "text": "Da li si {{proverio}} svoju e-poštu?",
-     "translation": "Did you check your email?",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294999,
-     "text": "{{Voleo}} bih da posetim Pariz jednog dana.",
-     "translation": "I wish to visit Paris someday.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294764,
-     "text": "{{Previše}} je vruće da bi se izašlo napolje.",
-     "translation": "It's too hot to go outside.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295013,
-     "text": "Ja imam {{ćerku}}.",
-     "translation": "I have a daughter.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294944,
-     "text": "Bila je {{malo}} nervozna.",
-     "translation": "She was feeling a bit nervous.",
-     "level": 2,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294919,
-     "text": "{{Donesi}} to ovde.",
-     "translation": "Bring that here.",
-     "level": 2,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294722,
-     "text": "Moram da {{uzmem}} malo vode.",
-     "translation": "I need to get some water.",
-     "level": 3,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294878,
-     "text": "Ja volim svog {{tatu}}.",
-     "translation": "I love my dad.",
-     "level": 2,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294892,
-     "text": "Ja {{uzimam}} sendvič.",
-     "translation": "I am getting a sandwich.",
-     "level": 2,
-     "played": 4,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294770,
-     "text": "Trebalo {{bi}} da krenemo pre nego što padne kiša.",
-     "translation": "We should leave before it rains.",
-     "level": 3,
-     "played": 5,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294747,
-     "text": "{{Pogledaj}} ovaj prelepi zalazak sunca!",
-     "translation": "Look at that beautiful sunset!",
-     "level": 3,
-     "played": 5,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-08-31"
     }
    ]
   },
@@ -881,16 +541,6 @@
      "last": "2026-09-07"
     },
     {
-     "id": 13294869,
-     "text": "Ovo se nikad nije {{dogodilo}}.",
-     "translation": "This never happened.",
-     "level": 0,
-     "played": 3,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
      "id": 13294832,
      "text": "On se {{bavi}} jogom.",
      "translation": "He does yoga.",
@@ -899,16 +549,6 @@
      "missed": 2,
      "favorited": true,
      "last": "2026-09-07"
-    },
-    {
-     "id": 13295160,
-     "text": "Majk se {{smeje}} svim mojim šalama.",
-     "translation": "Mike laughs at all my jokes.",
-     "level": 1,
-     "played": 3,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-03"
     },
     {
      "id": 13295126,
@@ -931,11 +571,81 @@
      "last": "2026-09-06"
     },
     {
+     "id": 13294869,
+     "text": "Ovo se nikad nije {{dogodilo}}.",
+     "translation": "This never happened.",
+     "level": 0,
+     "played": 3,
+     "missed": 2,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13295160,
+     "text": "Majk se {{smeje}} svim mojim šalama.",
+     "translation": "Mike laughs at all my jokes.",
+     "level": 1,
+     "played": 3,
+     "missed": 2,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13294826,
+     "text": "Tomu sam {{ispričao}} tajnu.",
+     "translation": "I told the secret to Tom.",
+     "level": 3,
+     "played": 4,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-06"
+    },
+    {
+     "id": 13294980,
+     "text": "Ne pomažem {{nikome}}.",
+     "translation": "I help nobody.",
+     "level": 2,
+     "played": 4,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-06"
+    },
+    {
      "id": 13295088,
      "text": "Prošetaj {{duž}} ivice parka.",
      "translation": "Walk along the edge of the park.",
      "level": 1,
      "played": 4,
+     "missed": 2,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13295127,
+     "text": "{{Njam}}! Ovo je ukusno!",
+     "translation": "Yum! This is tasty!",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-07"
+    },
+    {
+     "id": 13295186,
+     "text": "On ju je {{voleo}} svim srcem.",
+     "translation": "He loved her with all his heart.",
+     "level": 1,
+     "played": 1,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-07"
+    },
+    {
+     "id": 13294797,
+     "text": "Ja mu {{pomažem}}.",
+     "translation": "I help him.",
+     "level": 1,
+     "played": 5,
      "missed": 2,
      "favorited": true,
      "last": "2026-09-04"
@@ -961,46 +671,6 @@
      "last": "2026-09-03"
     },
     {
-     "id": 13294826,
-     "text": "Tomu sam {{ispričao}} tajnu.",
-     "translation": "I told the secret to Tom.",
-     "level": 3,
-     "played": 4,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13294980,
-     "text": "Ne pomažem {{nikome}}.",
-     "translation": "I help nobody.",
-     "level": 2,
-     "played": 4,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-06"
-    },
-    {
-     "id": 13294797,
-     "text": "Ja mu {{pomažem}}.",
-     "translation": "I help him.",
-     "level": 1,
-     "played": 5,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295033,
-     "text": "Izgledaš {{drugačije}}.",
-     "translation": "You look different.",
-     "level": 1,
-     "played": 4,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-02"
-    },
-    {
      "id": 13294861,
      "text": "Budi {{ljubazna}} osoba.",
      "translation": "Be a kind person.",
@@ -1009,86 +679,6 @@
      "missed": 2,
      "favorited": true,
      "last": "2026-09-04"
-    },
-    {
-     "id": 13295041,
-     "text": "Da li mogu da {{hodam}} tamo?",
-     "translation": "Can I walk there?",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295059,
-     "text": "Da li je to {{istina}}?",
-     "translation": "Is that the truth?",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295065,
-     "text": "Možeš da izabereš {{ili}} mačku ili psa.",
-     "translation": "You can choose either the cat or the dog.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295070,
-     "text": "Moja ribica je {{uginula}} pre dve nedelje.",
-     "translation": "My fish died two weeks ago.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13294785,
-     "text": "Ja sam to {{rekao}}.",
-     "translation": "I said that.",
-     "level": 1,
-     "played": 4,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295332,
-     "text": "Uradio je to samo {{zbog}} mene.",
-     "translation": "He did it only for my sake.",
-     "level": 1,
-     "played": 5,
-     "missed": 2,
-     "favorited": true,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295127,
-     "text": "{{Njam}}! Ovo je ukusno!",
-     "translation": "Yum! This is tasty!",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-07"
-    },
-    {
-     "id": 13295186,
-     "text": "On ju je {{voleo}} svim srcem.",
-     "translation": "He loved her with all his heart.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-07"
     },
     {
      "id": 13294792,
@@ -1161,6 +751,56 @@
      "last": "2026-09-06"
     },
     {
+     "id": 13294785,
+     "text": "Ja sam to {{rekao}}.",
+     "translation": "I said that.",
+     "level": 1,
+     "played": 4,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13295041,
+     "text": "Da li mogu da {{hodam}} tamo?",
+     "translation": "Can I walk there?",
+     "level": 2,
+     "played": 3,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295059,
+     "text": "Da li je to {{istina}}?",
+     "translation": "Is that the truth?",
+     "level": 2,
+     "played": 3,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295065,
+     "text": "Možeš da izabereš {{ili}} mačku ili psa.",
+     "translation": "You can choose either the cat or the dog.",
+     "level": 2,
+     "played": 3,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295070,
+     "text": "Moja ribica je {{uginula}} pre dve nedelje.",
+     "translation": "My fish died two weeks ago.",
+     "level": 2,
+     "played": 3,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
      "id": 13294769,
      "text": "Plače {{jer}} je izgubio.",
      "translation": "He is crying because he lost.",
@@ -1179,26 +819,6 @@
      "missed": 1,
      "favorited": true,
      "last": "2026-09-03"
-    },
-    {
-     "id": 13295005,
-     "text": "Ja sam {{oženjen}} brazilkom.",
-     "translation": "I am married to a Brazilian woman.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295011,
-     "text": "Odlučili su da se {{tuku}}.",
-     "translation": "They decided to fight.",
-     "level": 2,
-     "played": 3,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-01"
     },
     {
      "id": 13294784,
@@ -1309,36 +929,6 @@
      "missed": 0,
      "favorited": true,
      "last": "2026-09-03"
-    },
-    {
-     "id": 13294773,
-     "text": "{{Stvarno}}, nisam to znao.",
-     "translation": "Really, I did not know that.",
-     "level": 3,
-     "played": 3,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295007,
-     "text": "Moram da {{požurim}} da stignem na voz.",
-     "translation": "I must hurry to catch the train.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295134,
-     "text": "Sačuvaj to {{za}} kasnije.",
-     "translation": "Save it till later.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-01"
     }
    ]
   },
@@ -1355,26 +945,6 @@
      "missed": 1,
      "favorited": false,
      "last": "2026-09-07"
-    },
-    {
-     "id": 13295153,
-     "text": "Šta će se {{dogoditi}} ako pritisnem ovo dugme?",
-     "translation": "What happens if I press this button?",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295163,
-     "text": "{{Moguće}} je da ćemo doći kasno.",
-     "translation": "It's possible we'll arrive late.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": true,
-     "last": "2026-09-03"
     },
     {
      "id": 13295171,
@@ -1415,6 +985,26 @@
      "missed": 0,
      "favorited": true,
      "last": "2026-09-07"
+    },
+    {
+     "id": 13295153,
+     "text": "Šta će se {{dogoditi}} ako pritisnem ovo dugme?",
+     "translation": "What happens if I press this button?",
+     "level": 1,
+     "played": 2,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295163,
+     "text": "{{Moguće}} je da ćemo doći kasno.",
+     "translation": "It's possible we'll arrive late.",
+     "level": 1,
+     "played": 2,
+     "missed": 1,
+     "favorited": true,
+     "last": "2026-09-03"
     },
     {
      "id": 13295092,
@@ -1475,86 +1065,6 @@
      "missed": 0,
      "favorited": true,
      "last": "2026-09-06"
-    },
-    {
-     "id": 13295141,
-     "text": "{{Kladio}} sam se na tim.",
-     "translation": "I made a bet on the team.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295145,
-     "text": "Znam ovaj {{zvuk}}.",
-     "translation": "I know that sound.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295151,
-     "text": "{{Konačno}} sam dobio posao.",
-     "translation": "I finally got a job.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295078,
-     "text": "Stani u {{red}}.",
-     "translation": "Get in line.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295085,
-     "text": "Da li možemo sada da {{naručimo}} hranu?",
-     "translation": "Could we order food now?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295090,
-     "text": "{{Pokušao}} sam da spavam.",
-     "translation": "I tried to sleep.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-04"
-    },
-    {
-     "id": 13295133,
-     "text": "Zna {{zakon}}.",
-     "translation": "He knows the law.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295137,
-     "text": "Sinoć sam sanjao čudan {{san}}.",
-     "translation": "I had a strange dream last night.",
-     "level": 1,
-     "played": 2,
-     "missed": 1,
-     "favorited": false,
-     "last": "2026-09-01"
     },
     {
      "id": 13295108,
@@ -1747,66 +1257,6 @@
      "last": "2026-09-07"
     },
     {
-     "id": 13294760,
-     "text": "Treba mu {{pomoć}}.",
-     "translation": "He needs some help.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295064,
-     "text": "{{Dobrodošli}} u Brazil.",
-     "translation": "Welcome to Brazil.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295069,
-     "text": "Ko je {{doneo}} ovo?",
-     "translation": "Who brought this?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13294731,
-     "text": "Da li ćeš {{doći}} na moju zabavu?",
-     "translation": "Will you come to my party?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13294947,
-     "text": "Mora da je {{istina}}.",
-     "translation": "It must be true.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
-     "id": 13295157,
-     "text": "Ovo nema {{smisla}}.",
-     "translation": "This makes no sense.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": true,
-     "last": "2026-09-03"
-    },
-    {
      "id": 13295042,
      "text": "Znam šta to {{znači}}.",
      "translation": "I know what that means.",
@@ -1977,24 +1427,94 @@
      "last": "2026-09-06"
     },
     {
-     "id": 13295007,
-     "text": "Moram da {{požurim}} da stignem na voz.",
-     "translation": "I must hurry to catch the train.",
+     "id": 13295078,
+     "text": "Stani u {{red}}.",
+     "translation": "Get in line.",
      "level": 2,
      "played": 2,
      "missed": 0,
      "favorited": true,
-     "last": "2026-09-01"
+     "last": "2026-09-04"
     },
     {
-     "id": 13295134,
-     "text": "Sačuvaj to {{za}} kasnije.",
-     "translation": "Save it till later.",
+     "id": 13295085,
+     "text": "Da li možemo sada da {{naručimo}} hranu?",
+     "translation": "Could we order food now?",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13295090,
+     "text": "{{Pokušao}} sam da spavam.",
+     "translation": "I tried to sleep.",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-04"
+    },
+    {
+     "id": 13294760,
+     "text": "Treba mu {{pomoć}}.",
+     "translation": "He needs some help.",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295064,
+     "text": "{{Dobrodošli}} u Brazil.",
+     "translation": "Welcome to Brazil.",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295069,
+     "text": "Ko je {{doneo}} ovo?",
+     "translation": "Who brought this?",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13294731,
+     "text": "Da li ćeš {{doći}} na moju zabavu?",
+     "translation": "Will you come to my party?",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13294947,
+     "text": "Mora da je {{istina}}.",
+     "translation": "It must be true.",
+     "level": 2,
+     "played": 2,
+     "missed": 0,
+     "favorited": true,
+     "last": "2026-09-03"
+    },
+    {
+     "id": 13295157,
+     "text": "Ovo nema {{smisla}}.",
+     "translation": "This makes no sense.",
      "level": 1,
      "played": 1,
      "missed": 0,
      "favorited": true,
-     "last": "2026-09-01"
+     "last": "2026-09-03"
     },
     {
      "id": 13295079,
@@ -2365,590 +1885,14 @@
      "missed": 0,
      "favorited": false,
      "last": "2026-09-03"
-    },
-    {
-     "id": 13295132,
-     "text": "{{Drago}} mi je da se osećaš bolje.",
-     "translation": "I'm glad that you are feeling better.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294983,
-     "text": "Pojačaj {{muziku}}!",
-     "translation": "Turn up the music!",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295014,
-     "text": "Uvedite ga {{unutra}}.",
-     "translation": "Bring him inside.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295016,
-     "text": "To je {{verovatno}} bio Tom.",
-     "translation": "It was probably Tom.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295018,
-     "text": "{{Devojke}} rade u školi.",
-     "translation": "The girls work in the school.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295019,
-     "text": "Ja trenutno {{radim}}.",
-     "translation": "I am working right now.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295020,
-     "text": "Video sam {{upravo}} to.",
-     "translation": "I saw exactly that.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295021,
-     "text": "Ona {{žena}} je prelepa.",
-     "translation": "That lady is beautiful.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295022,
-     "text": "Sviđaju mi se {{žene}} koje plešu.",
-     "translation": "I like women who dance.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295023,
-     "text": "{{Pitao}} si me za pomoć.",
-     "translation": "You asked me to help.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295026,
-     "text": "Ja volim tu {{priču}}.",
-     "translation": "I love that story.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295027,
-     "text": "Oni žive u malom {{gradu}}.",
-     "translation": "They live in a small town.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295028,
-     "text": "Video sam ga prošle {{nedelje}}.",
-     "translation": "I saw him last week.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295029,
-     "text": "Da li možeš molim te da mi {{pročitaš}} ovu knjigu?",
-     "translation": "Can you please read this book for me?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295031,
-     "text": "Da li je ovo {{tvoja}} hrana?",
-     "translation": "Is this food yours?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295032,
-     "text": "Obrazovanje je veoma {{važno}}.",
-     "translation": "Education is very important.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295034,
-     "text": "Oni su imali samo jedno {{dete}}.",
-     "translation": "They had only one child.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295036,
-     "text": "{{Poenta}} igre je pobeda.",
-     "translation": "The point of the game is to win.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295140,
-     "text": "Budite ljubazni prema {{drugima}}.",
-     "translation": "Be kind to others.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295142,
-     "text": "Počela je pre {{deset}} minuta.",
-     "translation": "She started ten minutes ago.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295143,
-     "text": "{{Prati}} taj auto.",
-     "translation": "Follow that car.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295144,
-     "text": "On trči veoma {{brzo}}.",
-     "translation": "He runs very fast.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295146,
-     "text": "Pokušaj da {{uhvatiš}} loptu.",
-     "translation": "Try to catch the ball.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295147,
-     "text": "Budi {{oprezan}}.",
-     "translation": "Be careful.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13295148,
-     "text": "Da li možeš da {{okačiš}} ovu fotografiju?",
-     "translation": "Can you hang this picture?",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-02"
-    },
-    {
-     "id": 13294995,
-     "text": "Hajde da se {{dogovorimo}}.",
-     "translation": "Let's make a deal.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294996,
-     "text": "Oni {{govore}} mandarinski tečno.",
-     "translation": "They can speak Mandarin fluently.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295004,
-     "text": "{{Rat}} je pakao.",
-     "translation": "War is hell.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295006,
-     "text": "Tri je moj omiljeni {{broj}}.",
-     "translation": "Three is my favorite number.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295008,
-     "text": "On je video malu {{vatru}}.",
-     "translation": "He saw a small fire.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295010,
-     "text": "Mi živimo {{blizu}} parka.",
-     "translation": "We live close to the park.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295012,
-     "text": "Moram da {{odmorim}} posle šetnje.",
-     "translation": "I must rest after walking.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294917,
-     "text": "{{Večeras}} gledam film.",
-     "translation": "I am seeing a movie tonight.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295130,
-     "text": "Ko je {{poslao}} ovo?",
-     "translation": "Who sent this?",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295131,
-     "text": "Ja ne {{mogu}} da vam pomognem.",
-     "translation": "I cannot help you.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295135,
-     "text": "Ona ima dugu {{kosu}}.",
-     "translation": "She has long hair.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295664,
-     "text": "Otpušten sam sa {{posla}}.",
-     "translation": "I was fired from my job.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295136,
-     "text": "Svi smo mi {{ljudska}} bića.",
-     "translation": "We are all human beings.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295138,
-     "text": "Pređi {{ulicu}} pažljivo.",
-     "translation": "Cross the street carefully.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13295139,
-     "text": "Tom ne ume da {{vozi}}.",
-     "translation": "Tom cannot drive.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-09-01"
-    },
-    {
-     "id": 13294974,
-     "text": "On je samo {{dete}}.",
-     "translation": "He is just a kid.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294976,
-     "text": "Sada pokušaj da {{spavaš}}.",
-     "translation": "Now try to sleep.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294977,
-     "text": "Ova knjiga je {{moja}}.",
-     "translation": "This book is mine.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294979,
-     "text": "Mnogi ljudi se plaše {{smrti}}.",
-     "translation": "Many people fear death.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294982,
-     "text": "Tom je pojeo {{drugi}} sendvič.",
-     "translation": "Tom ate a second sandwich.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294984,
-     "text": "{{Neko}} te je zvao.",
-     "translation": "Somebody called you.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294986,
-     "text": "Ko {{zna}}?",
-     "translation": "Who knows?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294988,
-     "text": "On je {{udario}} moju ruku.",
-     "translation": "He hit my arm.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294989,
-     "text": "Imamo dvoje {{dece}}.",
-     "translation": "We have two kids.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13294992,
-     "text": "O čemu smo {{mislili}}?",
-     "translation": "What were we thinking?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13295149,
-     "text": "Jesam li {{siguran}} ovde?",
-     "translation": "Am I safe here?",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13295002,
-     "text": "{{Sečem}} picu pre jela.",
-     "translation": "I cut the pizza before I eat it.",
-     "level": 2,
-     "played": 2,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13295105,
-     "text": "{{Knjiga}} je nova.",
-     "translation": "The book is new.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13295106,
-     "text": "Oni {{žive}} u Njujorku.",
-     "translation": "They are living in New York.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13295113,
-     "text": "Danas je vreme zaista {{hladno}}.",
-     "translation": "The weather is really cold today.",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
-    },
-    {
-     "id": 13295114,
-     "text": "Dobro {{veče}}!",
-     "translation": "Good evening!",
-     "level": 1,
-     "played": 1,
-     "missed": 0,
-     "favorited": false,
-     "last": "2026-08-31"
     }
    ]
   }
  ],
  "words": [
-  "malo",
-  "bi",
-  "ili",
-  "žena",
-  "govore",
-  "nešto",
   "znači",
-  "još",
-  "sam",
-  "siguran",
-  "dete",
-  "neko",
-  "voleo",
-  "gradu",
-  "nedelje",
   "istina",
-  "mogu",
-  "sreće",
-  "brzo"
+  "sreće"
  ],
  "stamp": "Pulled 7 September 2026 for CVP"
 }
