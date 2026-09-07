@@ -179,6 +179,51 @@ sentence, `week_notes` one row per week for the pad. The DDL for both lives in
 `notes-backend.json`; apply it by hand before publishing a page that depends on
 it. Both statements are `if not exists`, so re-running them is free.
 
+### Two people editing at once
+
+The tutor and I are both in the sheet during the hour, so the question isn't
+whether edits collide but what happens when they do. Two things stop one person
+erasing the other:
+
+**Text is published on a pause in typing, not on leaving the field.** Blur-only
+saving meant your work sat in your browser for as long as you kept the cursor
+there, and whoever left their field last overwrote the other outright. A write
+now goes out ~800 ms after you stop typing, so the window in which two people can
+diverge is about a second instead of a whole train of thought.
+
+**Every write is a compare-and-swap on `rev`.** The upsert carries a
+`where rev = <the revision this browser last read>`, so a write that would land
+on top of a change you never saw simply doesn't apply — `affected_row_count`
+comes back 0 and the same round trip returns what is actually stored. The page
+then runs a line-level three-way merge between the common ancestor, your text
+and theirs, and retries from their revision. Both edits survive.
+
+Non-overlapping edits merge with nobody noticing, including the ordinary case of
+two people appending different lines. A hunk that merely *starts* where another
+ends counts as adjacent, not conflicting — rewording a line while someone adds
+one after it is not a disagreement. Only a genuine overlap, both rewriting the
+same lines differently, keeps both copies between `[both edited — yours]` /
+`[both edited — theirs]` / `[end]`, and the badge says "Both edited — kept both"
+so the markers don't read as corruption.
+
+Incoming text is applied into a field you are *typing in*, with the caret mapped
+across the change rather than thrown to the end. Dropping remote edits to protect
+the typist was the old behaviour, and it guaranteed the loss: the drop was
+silent, and the next save wrote the dropped text back out.
+
+`rev` is not a clock, which is the point — see the rejected `updated_at` guard
+below. It answers only "did this row change since I read it".
+
+The third copy of every note, `shadow`, is the ancestor those merges need. It
+lives in `localStorage` under `klozar:base:<week>`, beside but separate from the
+notes themselves, so a page saved before it existed still loads and simply adopts
+the store's version on its first poll.
+
+The document store behind the artifact copy has no conditional write, so there
+the guard is checked against the newest snapshot instead of inside the write —
+narrower, since two writes inside one snapshot interval can still race, but it
+still refuses a revision the page hasn't seen.
+
 The pad is not a second sync system. It rides the per-sentence machinery under
 the reserved key `__week__`, which no sentence id can collide with, so it inherits
 the coalescing, the localStorage fallback and the don't-clobber-what's-being-typed
@@ -186,7 +231,7 @@ rule rather than growing a subtly different copy of each.
 
 Two details worth keeping if you touch the sync code:
 
-- **One write in flight per sentence.** Ticking a box and then typing a note fires
+- **One write in flight per key.** Ticking a box and then typing a note fires
   two saves for the same row; without serialization the slower first request can
   land last and overwrite the newer state. This ate a note the first time it was
   tested. A change made while a save is out sets a flag, and the re-run reads
