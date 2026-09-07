@@ -1,0 +1,59 @@
+# Headscale configuration for hiveqa single-deployment mode.
+# See https://headscale.net/stable/ref/configuration/ for all options.
+#
+# Override this file by mounting your own at /etc/headscale/config.yaml.
+
+server_url: "https://headscale.example.com"  # MUST be set to your public URL
+listen_addr: "0.0.0.0:8080"
+metrics_listen_addr: "0.0.0.0:9090"
+
+# gRPC is used by the headscale CLI.
+grpc_listen_addr: "0.0.0.0:50443"
+grpc_allow_insecure: true
+
+# Noise protocol for client connections (required).
+noise:
+  private_key_path: /data/headscale/noise_private.key
+
+# Prefixes for tailnet IP assignment.
+prefixes:
+  v4: "100.64.0.0/10"
+  v6: "fd7a:115c:a1e0::/48"
+  allocation: sequential
+
+# Database — SQLite for single-node deployments.
+database:
+  type: sqlite
+  sqlite:
+    path: /data/headscale/db.sqlite
+    write_ahead_log: true
+
+# DERP — use embedded server + Tailscale's public relays as fallback.
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "hiveqa"
+    region_name: "hiveqa embedded"
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /data/headscale/derp_private.key
+    automatically_add_embedded_derp_region: true
+  urls:
+    - "https://controlplane.tailscale.com/derpmap/default"
+  auto_update_enabled: true
+  update_frequency: 24h
+
+# DNS / MagicDNS configuration.
+dns:
+  magic_dns: true
+  base_domain: "hiveqa.internal"
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+
+# Ephemeral node cleanup.
+ephemeral_node_inactivity_timeout: 5m
+
+# Pre-auth key defaults.
+# Keys are created via: headscale preauthkeys create --user default
