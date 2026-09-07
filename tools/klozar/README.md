@@ -1,7 +1,8 @@
 # klozar
 
-Pulls the week's Serbian practice out of [Clozemaster](https://www.clozemaster.com)
-and writes a lesson sheet to bring to a tutor.
+Pulls the Serbian practice since the last lesson out of
+[Clozemaster](https://www.clozemaster.com) and writes a lesson sheet to bring to
+a tutor.
 
 ```
 klozar.py        the CLI
@@ -50,13 +51,38 @@ credential. Run it locally instead; see below.
 ## Use
 
 ```sh
-uv run klozar.py lesson                  # last 7 days -> out/<date>-serbian-lesson.md
-uv run klozar.py lesson --days 14
+uv run klozar.py lesson                  # since the last sheet -> out/<date>-serbian-lesson.md
+uv run klozar.py lesson --days 14        # override the window
+uv run klozar.py lesson --max-days 21    # or just raise the ceiling
 uv run klozar.py lesson --stdout         # straight to the terminal
 uv run klozar.py snapshot                # raw JSON, one file per week, good for diffing
 uv run klozar.py snapshot --scope favorited
 uv run klozar.py artifact                # interactive HTML, ready to publish
 ```
+
+### How far back it looks
+
+Lessons are not weekly — sometimes two land in one week, sometimes a fortnight
+goes by. A fixed 7 days gets both cases wrong: it re-shows what the last sheet
+already covered, or it drops the middle of a long gap.
+
+So the window runs from **the previous sheet to today**, with a ceiling of 14
+days (`--max-days`). `weeks.json` records when every sheet was made and a sheet
+is made per lesson, so the previous entry is the best available answer to "when
+did we last do this". Today's own entry is skipped, or rebuilding would measure
+zero against itself.
+
+It is a proxy, not a log: rebuild twice in one day for some unrelated reason and
+the next window shrinks to match. `--days N` overrides it, and every run prints
+which window it chose and why.
+
+The window also feeds the page — recency in the default ordering is normalised
+over the actual span, so a four-day sheet doesn't treat a three-day-old sentence
+as ancient.
+
+One consequence worth expecting: narrowing the window drops sentences that fall
+outside it, annotated or not. Nothing is lost — a note belongs to the sentence,
+so it comes back with the sentence.
 
 The sheet has four sections: **Gave me trouble** — the part worth a tutor's time
 — **Starred this week**, **New this week**, and the cloze words that recurred
