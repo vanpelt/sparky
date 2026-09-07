@@ -58,9 +58,40 @@ uv run klozar.py snapshot --scope favorited
 uv run klozar.py artifact                # interactive HTML, ready to publish
 ```
 
-The sheet has four sections: **Gave me trouble** (ranked by miss rate — the part
-worth a tutor's time), **Starred this week**, **New this week**, and the cloze
-words that recurred most.
+The sheet has four sections: **Gave me trouble** — the part worth a tutor's time
+— **Starred this week**, **New this week**, and the cloze words that recurred
+most.
+
+### How it's ordered
+
+Miss rate alone ranks badly. Half the week sits at "1 of 2", and a sentence
+fumbled last Monday has usually been re-drilled since. The default order is a
+blend instead:
+
+    0.55 × (missed / played)  +  0.30 × recency  +  0.15 × starred
+
+where recency decays linearly across the window, measured from the newest day
+*in the sheet* rather than from today — so a sheet reopened in December still
+ranks the week it covers the way it did when it was pulled.
+
+The page carries the same formula in JS and re-sorts client-side, so a dropdown
+in the controls row switches between:
+
+| | |
+| --- | --- |
+| **Worst & freshest** | the blend above — the default |
+| **Most recent** | last played, newest first |
+| **Worst miss rate** | what the sheet used to do, kept because it still answers a real question |
+
+Beside it, **★ Starred only** filters every section down to what was flagged by
+hand. Both settings live in `localStorage` under `klozar:prefs` — they're a
+reading habit, not a property of a week, so they survive switching weeks.
+
+Because the page re-orders, the data can't be pre-cut by one ordering: "most
+recent" over the 25 worst is not the most recent. So every matching sentence
+ships and a section *opens* on the first `--limit` (25) of them, with the rest
+behind a "show all". That is why a week's JSON went from ~15 KB to ~65 KB —
+about 9 KB over the wire, since Pages gzips it.
 
 ## The interactive sheet
 
@@ -122,8 +153,9 @@ the page uses the artifact's own store instead; on any other host with neither,
 
 There is **one** HTML shell. `index.html` carries the CSS, the JS, and the newest
 week's data baked in, so the default URL paints immediately and works offline.
-Every week also gets a `weeks/<date>.json` of pure content — about 15 KB, against
-36 KB if the whole document were copied per week. Older weeks load as
+Every week also gets a `weeks/<date>.json` of pure content — around 65 KB now
+that whole sections ship rather than their top 25 (9 KB gzipped), against a whole
+duplicated document per week. Older weeks load as
 `index.html?week=<date>`; a dropdown in the controls row switches between them.
 
 Two things fall out of that split. Because the shell is the only copy of the CSS
@@ -183,7 +215,10 @@ Each run rolls the cookie forward, so the schedule is what keeps auth alive.
 
 Starring alone turns out to be a weak signal: it's sticky, so the same handful of
 old sentences come back every week. `lastPlayedDate` combined with
-`numIncorrect / numPlayed` is what actually surfaces the current week's friction.
+`numIncorrect / numPlayed` is what actually surfaces the current week's friction —
+which is why the blend gives starring only a 0.15 nudge, enough to break a tie
+and not enough to float a stale favourite to the top. It gets its own filter
+instead, for when that *is* what you want to look at.
 
 ## The API
 
