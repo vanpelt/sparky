@@ -174,10 +174,43 @@ append-only, versioned, restorable — and the page's Turso token is public and
 read-write, so putting them there would mean anyone with the link could erase the
 archive rather than just this week's notes.
 
-Two tables, and the page never creates either — `notes` holds one row per
-sentence, `week_notes` one row per week for the pad. The DDL for both lives in
+Three tables, and the page never creates any of them. The DDL lives in
 `notes-backend.json`; apply it by hand before publishing a page that depends on
-it. Both statements are `if not exists`, so re-running them is free.
+it. All three statements are `if not exists`, so re-running them is free.
+
+| Table | Keyed by | Holds |
+| --- | --- | --- |
+| `sentence_notes` | sentence | the note — no week column at all |
+| `notes` | week + sentence | the weekly tick |
+| `week_notes` | week | the Lesson notes pad |
+
+### What carries between weeks
+
+A sentence often comes back. What I worked out about *posebno* is still true in
+November, so **a note belongs to the sentence, not to the week** — it has no week
+column, and the same note shows up in every sheet the sentence appears in.
+
+A tick means something different: *did I go through this in this week's lesson*.
+That has to reset. But a sentence I have already been through is not the same as
+one I have never touched, so a box covered in an earlier week and not yet in this
+one renders in the checkbox's third state — a dash rather than empty — with a
+legend above the sheet and a tooltip on the box. Ticking it fills it in; unticking
+returns it to the dash rather than to empty, because this week is undone but the
+earlier weeks still happened. The "covered today" tally counts only this week.
+
+The three are separate sync keys (`n:<id>`, `t:<id>`, and `__week__`) with
+separate revisions, because they do not share a lifetime and so cannot share a
+row. The page above the sync layer still reads one object per sentence; `readCell`
+and `writeCell` are the whole of the translation.
+
+On disk that means two `localStorage` scopes: `klozar:<week>` for the ticks and
+the pad, `klozar:notes` for the notes, plus `klozar:prior` for which sentences
+carry a tick from an earlier week. A blob written by an older page kept its notes
+under the week, so boot reads those too and an upgrade keeps them on screen.
+
+The `note` column on `notes` is vestigial after the migration to `sentence_notes`.
+It is left populated on purpose, so a browser still running an older copy of the
+page keeps showing something; it is safe to blank once every client has reloaded.
 
 ### Two people editing at once
 

@@ -152,6 +152,11 @@ h2 {
   cursor: pointer; display: grid; place-content: center; flex: none;
 }
 .tick:checked { background: var(--done); border-color: var(--done); }
+/* The carried-over state: covered in an earlier week, not yet in this one. */
+.tick:indeterminate { border-color: var(--done); background: var(--done-soft); }
+.tick:indeterminate::after {
+  content: ""; width: .5rem; height: 0; border-top: 2px solid var(--done);
+}
 .tick:checked::after {
   content: ""; width: .34rem; height: .62rem; margin-top: -.12rem;
   border: solid var(--raised); border-width: 0 2px 2px 0; transform: rotate(42deg);
@@ -192,6 +197,21 @@ textarea {
   border: 1px solid var(--rule); border-left: 3px solid var(--done); border-radius: 3px;
 }
 textarea::placeholder { color: var(--faint); font-style: italic; }
+
+.legend {
+  display: flex; align-items: center; gap: .45rem; margin: .9rem 0 0;
+  font-family: var(--slab); font-size: .72rem; letter-spacing: .04em;
+  color: var(--muted);
+}
+.legend[hidden] { display: none; }
+.legend .box {
+  width: .95rem; height: .95rem; flex: none; border-radius: 3px;
+  border: 1.5px solid var(--done); background: var(--done-soft);
+  display: grid; place-content: center;
+}
+.legend .box::after {
+  content: ""; width: .42rem; height: 0; border-top: 2px solid var(--done);
+}
 
 /* --- the week's own notes --- */
 .pad { margin-top: 2rem; }
@@ -244,6 +264,11 @@ footer {
     <button id="clear-covered" type="button">Reset ticks</button>
     <span class="saving" id="saving"></span>
   </div>
+
+  <p class="legend" id="legend" hidden>
+    <span class="box" aria-hidden="true"></span>
+    Reviewed in an earlier week — not yet this week.
+  </p>
 
   <section class="pad">
     <h2>Lesson notes</h2>
@@ -305,14 +330,39 @@ footer {
 
   function status(text) { savingEl.textContent = text; }
 
-  // The week's own notes are just another entry in `state`, under a key no
-  // sentence id can collide with (ids are numeric). That buys the whole save
-  // discipline for free — the same coalescing, the same localStorage fallback,
-  // the same "don't clobber what's being typed" rule — instead of a second,
-  // subtly different copy of it. countCovered and "reset ticks" both look for
-  // real sentences, so neither notices it.
+  // Three kinds of thing get stored and they do not share a lifetime, so they
+  // cannot share a row or a revision. A sentence's NOTE follows the sentence and
+  // outlives any one week — what you worked out about "posebno" is still true in
+  // November. Its TICK answers "did I review it *this* week", which is only ever
+  // about one week. The PAD belongs to the week. Each is its own sync key with
+  // its own revision, while the page above goes on reading `state[id]` as one
+  // object per sentence.
   var WEEK_KEY = "__week__";
   var padEl = document.getElementById("week-note");
+
+  function noteKey(id) { return "n:" + id; }
+  function tickKey(id) { return "t:" + id; }
+
+  function cellOf(key) {
+    if (key === WEEK_KEY) return { id: WEEK_KEY, kind: "pad" };
+    return { id: key.slice(2), kind: key.charAt(0) === "n" ? "note" : "tick" };
+  }
+
+  function readCell(key) {
+    var c = cellOf(key), e = entry(c.id);
+    return c.kind === "tick" ? { note: "", covered: !!e.covered }
+                             : { note: e.note, covered: false };
+  }
+
+  function writeCell(key, val) {
+    var c = cellOf(key), e = entry(c.id);
+    if (c.kind === "tick") e.covered = !!val.covered;
+    else e.note = val.note || "";
+  }
+
+  // Sentences ticked in some earlier week. Not a state of the sentence, a fact
+  // about my history with it, which is why it never rides in `state`.
+  var prior = {};
 
   function entry(id) {
     if (!state[id]) state[id] = { note: "", covered: false };
@@ -336,10 +386,33 @@ footer {
     return shadow[id];
   }
 
+  // Two scopes on disk, because a note is not week-scoped any more: the ticks and
+  // the pad go under the week, the notes go somewhere every week can read them.
+  // Splitting here rather than keying `state` differently keeps the rendering
+  // code working on one object per sentence.
+  var NOTES_KEY = "klozar:notes";
+  var NOTES_BASE = "klozar:base:notes";
+  var PRIOR_KEY = "klozar:prior";
+
   function saveLocal() {
+    var week = {}, notes = {}, weekBase = {}, noteBase = {}, id, k;
+    for (id in state) {
+      if (id === WEEK_KEY) { week[id] = { note: state[id].note }; continue; }
+      week[id] = { covered: !!state[id].covered };
+      if (state[id].note) notes[id] = state[id].note;
+    }
+    for (k in shadow) {
+      if (k.indexOf("n:") === 0) noteBase[k] = shadow[k];
+      else weekBase[k] = shadow[k];
+    }
+    var carried = [];
+    for (id in prior) if (prior[id]) carried.push(id);
     try {
-      localStorage.setItem(KEY, JSON.stringify(state));
-      localStorage.setItem(BASE, JSON.stringify(shadow));
+      localStorage.setItem(KEY, JSON.stringify(week));
+      localStorage.setItem(BASE, JSON.stringify(weekBase));
+      localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+      localStorage.setItem(NOTES_BASE, JSON.stringify(noteBase));
+      localStorage.setItem(PRIOR_KEY, JSON.stringify(carried));
     } catch (e) {
       /* private window, full quota — the page still works, just forgets */
     }
@@ -407,68 +480,94 @@ footer {
 
   // Reconcile one key against the store's version of it. Returns null when
   // there was nothing to do, so callers know whether to touch the DOM.
-  function absorbOne(id, remote) {
+  function absorbOne(key, remote) {
     if (!remote) return null;
-    var e = entry(id), b = ancestor(id);
+    var mine = readCell(key), b = ancestor(key), c = cellOf(key);
     var adopt = function () {
-      shadow[id] = { note: remote.note || "", covered: !!remote.covered, rev: remote.rev };
+      shadow[key] = { note: remote.note || "", covered: !!remote.covered, rev: remote.rev };
     };
 
     // Already agreed — take their revision so the next write has the right base.
     // This is also what a browser upgrading from the pre-`rev` page does.
-    if (e.note === (remote.note || "") && !!e.covered === !!remote.covered) {
+    if (mine.note === (remote.note || "") && mine.covered === !!remote.covered) {
       adopt(); saveLocal(); return null;
     }
-    if (remote.rev === b.rev && (remote.note || "") === b.note) return null;  // nothing new
+    if (remote.rev === b.rev && (remote.note || "") === b.note &&
+        !!remote.covered === !!b.covered) return null;             // nothing new
 
     var result = { conflict: false };
-    if (e.note === b.note && !!e.covered === !!b.covered) {
-      e.note = remote.note || "";                 // no local edits — fast-forward
-      e.covered = !!remote.covered;
-    } else {
-      var m = merge3(b.note, e.note, remote.note || "");
-      e.note = m.text;
-      result.conflict = m.conflict;
+    if (mine.note === b.note && mine.covered === !!b.covered) {
+      writeCell(key, { note: remote.note || "", covered: !!remote.covered });
+    } else if (c.kind === "tick") {
       // A tick is one bit: whoever moved it off the ancestor wins, and if both
       // moved it they necessarily agree.
-      e.covered = (!!e.covered !== !!b.covered) ? !!e.covered : !!remote.covered;
+      writeCell(key, { covered: mine.covered !== !!b.covered ? mine.covered
+                                                            : !!remote.covered });
+    } else {
+      var m = merge3(b.note, mine.note, remote.note || "");
+      writeCell(key, { note: m.text });
+      result.conflict = m.conflict;
     }
     adopt();
     saveLocal();
     return result;
   }
 
-  function applyOne(id) {
-    if (id === WEEK_KEY) showPad(); else reflect(id);
+  function applyOne(key) {
+    var c = cellOf(key);
+    if (c.kind === "pad") showPad(); else reflect(c.id);
   }
 
-  // Everything the store just told us, in one pass. `pad` may be null.
-  function absorb(rows, pad) {
+  // Everything the store just told us, in one pass.
+  function absorb(got) {
     var touched = [], owed = [], marked = false;
-    var take = function (id, remote) {
+    var take = function (key, remote) {
       // A response is on the wire for this key; it will set the ancestor when it
       // lands, and reconciling against a stale read now would corrupt it.
-      if (inflight[id] || queued[id]) return;
-      var merged = absorbOne(id, remote);
+      if (inflight[key] || queued[key]) return;
+      var merged = absorbOne(key, remote);
       if (!merged) return;
       if (merged.conflict) marked = true;
-      touched.push(id);
-      var e = entry(id);
-      // A merge can produce text neither side has yet. That has to go back.
-      if (e.note !== (remote.note || "") || !!e.covered !== !!remote.covered) owed.push(id);
+      touched.push(key);
+      var mine = readCell(key);
+      // A merge can produce something neither side has yet. That has to go back.
+      if (mine.note !== (remote.note || "") || mine.covered !== !!remote.covered) {
+        owed.push(key);
+      }
     };
 
-    rows.forEach(function (r) {
-      take(r.id, { note: r.note, covered: r.covered, rev: r.rev });
+    (got.ticks || []).forEach(function (r) {
+      take(tickKey(r.id), { note: "", covered: r.covered, rev: r.rev });
     });
-    if (pad) take(WEEK_KEY, pad);
+    (got.notes || []).forEach(function (r) {
+      take(noteKey(r.id), { note: r.note, covered: false, rev: r.rev });
+    });
+    if (got.pad) take(WEEK_KEY, got.pad);
 
-    if (!touched.length) return false;
+    var priorMoved = false;
+    if (got.prior) {
+      var next = {}, id;
+      got.prior.forEach(function (x) { next[x] = true; });
+      for (id in next) if (!prior[id]) priorMoved = true;
+      for (id in prior) if (!next[id]) priorMoved = true;
+      prior = next;
+      if (priorMoved) saveLocal();
+    }
+
+    if (!touched.length && !priorMoved) return false;
     touched.forEach(applyOne);
+    // A change in what was carried over repaints every box, not one.
+    if (priorMoved) repaintTicks();
     countCovered();
     owed.forEach(push);
     if (marked) status("Both edited — kept both");
     return true;
+  }
+
+  function repaintTicks() {
+    var rows = document.querySelectorAll(".row[data-id]");
+    for (var i = 0; i < rows.length; i++) reflect(rows[i].dataset.id);
+    showLegend();
   }
 
   // --- merging two people's text ----------------------------------------
@@ -683,7 +782,10 @@ footer {
       var row = rows[i];
       row.classList.toggle("is-covered", !!e.covered);
       var tick = row.querySelector(".tick");
-      if (tick !== document.activeElement) tick.checked = !!e.covered;
+      if (tick !== document.activeElement) {
+        tick.checked = !!e.covered;
+        markTick(tick, id, e);
+      }
       var btn = row.querySelector(".notebtn");
       btn.classList.toggle("has-note", !!e.note);
       btn.textContent = e.note ? "note" : "+ note";
@@ -692,6 +794,28 @@ footer {
       // whoever opened it to type.
       if (e.note) row.querySelector(".note").hidden = false;
     }
+  }
+
+  // Not covered this week, but covered in one before: the box goes to the
+  // browser's own third state rather than looking untouched, so a sentence you
+  // have already worked through is visibly different from one you have not.
+  function markTick(tick, id, e) {
+    var carried = !e.covered && !!prior[id];
+    tick.indeterminate = carried;
+    tick.title = e.covered ? "Covered this week"
+      : carried ? "Reviewed in an earlier week — not yet this week"
+      : "";
+  }
+
+  function showLegend() {
+    var el = document.getElementById("legend");
+    var rows = document.querySelectorAll(".row[data-id]");
+    var any = false;
+    for (var i = 0; i < rows.length && !any; i++) {
+      var id = rows[i].dataset.id;
+      if (!entry(id).covered && prior[id]) any = true;
+    }
+    el.hidden = !any;
   }
 
   function rowEl(s) {
@@ -727,11 +851,18 @@ footer {
     var note = row.querySelector(".note");
     var ta = row.querySelector("textarea");
 
+    markTick(tick, String(s.id), e);
+
     tick.addEventListener("change", function () {
-      entry(s.id).covered = tick.checked;
+      var mine = entry(s.id);
+      mine.covered = tick.checked;
+      // Unticking falls back to the carried-over dash rather than to empty:
+      // this week is undone, the earlier weeks still happened.
+      markTick(tick, String(s.id), mine);
       reflect(s.id);
       countCovered();
-      flush(s.id);
+      showLegend();
+      flush(tickKey(s.id));
     });
 
     btn.addEventListener("click", function () {
@@ -745,15 +876,15 @@ footer {
     ta.addEventListener("input", function () {
       entry(s.id).note = ta.value;
       reflect(s.id);
-      nudge(s.id);
+      nudge(noteKey(s.id));
     });
 
     ta.addEventListener("blur", function () {
       var v = ta.value.trim();
-      if (v === entry(s.id).note && !timers[s.id]) return;
+      if (v === entry(s.id).note && !timers[noteKey(s.id)]) return;
       entry(s.id).note = v;
       reflect(s.id);
-      flush(s.id);
+      flush(noteKey(s.id));
     });
 
     row.dataset.id = s.id;
@@ -807,6 +938,8 @@ footer {
       }
       host.appendChild(el);
     });
+
+    showLegend();
 
     if (!total) {
       var none = document.createElement("p");
@@ -876,31 +1009,42 @@ footer {
       // The write and a read-back ride one pipeline. `affected_row_count` is 0
       // when the guard rejected the write, and the read then says what is
       // actually stored — so a lost race costs no extra round trip.
-      save: function (id, baseRev) {
-        var e = entry(id);
+      save: function (key, baseRev) {
+        var c = cellOf(key), v = readCell(key);
         var now = T(new Date().toISOString());
         var write, read;
-        if (id === WEEK_KEY) {
+        if (c.kind === "pad") {
           write = {
             sql: "insert into week_notes(week, note, updated_at, rev) values(?,?,?,1) " +
                  "on conflict(week) do update set note=excluded.note, " +
                  "updated_at=excluded.updated_at, rev=week_notes.rev+1 " +
                  "where week_notes.rev = ?",
-            args: [T(sheet.week), T(e.note || ""), now, I(baseRev)]
+            args: [T(sheet.week), T(v.note), now, I(baseRev)]
           };
           read = { sql: "select note, 0, rev from week_notes where week = ?",
                    args: [T(sheet.week)] };
+        } else if (c.kind === "note") {
+          // No week in this table on purpose: the note belongs to the sentence,
+          // so it is the same note in every week the sentence turns up in.
+          write = {
+            sql: "insert into sentence_notes(sentence_id, note, updated_at, rev) " +
+                 "values(?,?,?,1) on conflict(sentence_id) do update set " +
+                 "note=excluded.note, updated_at=excluded.updated_at, " +
+                 "rev=sentence_notes.rev+1 where sentence_notes.rev = ?",
+            args: [T(c.id), T(v.note), now, I(baseRev)]
+          };
+          read = { sql: "select note, 0, rev from sentence_notes where sentence_id = ?",
+                   args: [T(c.id)] };
         } else {
           write = {
-            sql: "insert into notes(week, sentence_id, note, covered, updated_at, rev) " +
-                 "values(?,?,?,?,?,1) on conflict(week, sentence_id) do update set " +
-                 "note=excluded.note, covered=excluded.covered, " +
-                 "updated_at=excluded.updated_at, rev=notes.rev+1 " +
-                 "where notes.rev = ?",
-            args: [T(sheet.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0), now, I(baseRev)]
+            sql: "insert into notes(week, sentence_id, covered, updated_at, rev) " +
+                 "values(?,?,?,?,1) on conflict(week, sentence_id) do update set " +
+                 "covered=excluded.covered, updated_at=excluded.updated_at, " +
+                 "rev=notes.rev+1 where notes.rev = ?",
+            args: [T(sheet.week), T(c.id), I(v.covered ? 1 : 0), now, I(baseRev)]
           };
-          read = { sql: "select note, covered, rev from notes where week = ? and sentence_id = ?",
-                   args: [T(sheet.week), T(id)] };
+          read = { sql: "select '', covered, rev from notes where week = ? and sentence_id = ?",
+                   args: [T(sheet.week), T(c.id)] };
         }
         return pipeline([write, read]).then(function (results) {
           var landed = results[0].response.result.affected_row_count > 0;
@@ -915,29 +1059,34 @@ footer {
           } };
         });
       },
-      // Both reads ride one pipeline: two round trips every 15s to say "nothing
-      // changed" is twice the free tier for no gain.
+      // Everything the page needs in one pipeline: this week's ticks, the notes
+      // (which are not week-scoped), the pad, and which sentences carry a tick
+      // from some earlier week.
       load: function () {
         return pipeline([
-          { sql: "select sentence_id, note, covered, rev from notes where week = ?",
+          { sql: "select sentence_id, covered, rev from notes where week = ?",
             args: [T(sheet.week)] },
+          { sql: "select sentence_id, note, rev from sentence_notes", args: [] },
           { sql: "select note, rev from week_notes where week = ?",
+            args: [T(sheet.week)] },
+          { sql: "select distinct sentence_id from notes where covered = 1 and week <> ?",
             args: [T(sheet.week)] }
         ]).then(function (results) {
           var text = function (c) { return c.type === "null" ? "" : c.value; };
-          var padRows = results[1].response.result.rows;
+          var rowsOf = function (i) { return results[i].response.result.rows; };
+          var padRows = rowsOf(2);
           return {
-            rows: results[0].response.result.rows.map(function (row) {
-              return {
-                id: row[0].value,
-                note: text(row[1]),
-                covered: row[2].value === "1",
-                rev: Number(row[3].value)
-              };
+            ticks: rowsOf(0).map(function (row) {
+              return { id: row[0].value, covered: row[1].value === "1",
+                       rev: Number(row[2].value) };
+            }),
+            notes: rowsOf(1).map(function (row) {
+              return { id: row[0].value, note: text(row[1]), rev: Number(row[2].value) };
             }),
             pad: padRows.length
               ? { note: text(padRows[0][0]), covered: false, rev: Number(padRows[0][1].value) }
-              : null
+              : null,
+            prior: rowsOf(3).map(function (row) { return row[0].value; })
           };
         });
       }
@@ -947,6 +1096,8 @@ footer {
   function artifactBackend(db) {
     var items = function () { return db.collection("lessons/" + sheet.week + "/items"); };
     var meta = function () { return db.collection("lessons/" + sheet.week + "/meta"); };
+    // Not under a week, for the same reason the SQL table has no week column.
+    var notes = function () { return db.collection("lessons/notes"); };
     // The document store has no conditional write, so the guard is checked
     // against the newest snapshot instead of inside the write. Narrower than the
     // SQL compare-and-swap — two writes inside one snapshot interval can still
@@ -957,30 +1108,43 @@ footer {
       sync = null;
       status("Saving on this device");
     };
+    var refOf = function (key) {
+      var c = cellOf(key);
+      if (c.kind === "pad") return meta().doc("notes");
+      if (c.kind === "note") return notes().doc(String(c.id));
+      return items().doc(String(c.id));
+    };
     return {
-      save: function (id, baseRev) {
-        var e = entry(id);
-        var known = seen[id];
+      save: function (key, baseRev) {
+        var v = readCell(key);
+        var known = seen[key];
         var rev = known ? known.rev : 0;
         if (known && rev !== baseRev) {
           return Promise.resolve({ ok: false, remote: known });
         }
-        var doc = { note: e.note, covered: !!e.covered, rev: rev + 1,
+        var doc = { note: v.note, covered: v.covered, rev: rev + 1,
                     at: new Date().toISOString() };
-        var ref = id === WEEK_KEY ? meta().doc("notes") : items().doc(String(id));
-        return ref.set(doc).then(function () {
-          seen[id] = { note: doc.note, covered: doc.covered, rev: doc.rev };
+        return refOf(key).set(doc).then(function () {
+          seen[key] = { note: doc.note, covered: doc.covered, rev: doc.rev };
           return { ok: true, rev: doc.rev };
         });
       },
       watch: function () {
         items().onSnapshot(function (snap) {
-          absorb(snap.docs.map(function (d) {
+          absorb({ ticks: snap.docs.map(function (d) {
             var b = d.data() || {};
-            var r = { id: d.id, note: b.note || "", covered: !!b.covered, rev: b.rev || 0 };
-            seen[d.id] = { note: r.note, covered: r.covered, rev: r.rev };
+            var r = { id: d.id, covered: !!b.covered, rev: b.rev || 0 };
+            seen[tickKey(d.id)] = { note: "", covered: r.covered, rev: r.rev };
             return r;
-          }), null);
+          }) });
+        }, dropped);
+        notes().onSnapshot(function (snap) {
+          absorb({ notes: snap.docs.map(function (d) {
+            var b = d.data() || {};
+            var r = { id: d.id, note: b.note || "", rev: b.rev || 0 };
+            seen[noteKey(d.id)] = { note: r.note, covered: false, rev: r.rev };
+            return r;
+          }) });
         }, dropped);
         meta().onSnapshot(function (snap) {
           snap.docs.forEach(function (d) {
@@ -988,7 +1152,7 @@ footer {
             var b = d.data() || {};
             var r = { note: b.note || "", covered: false, rev: b.rev || 0 };
             seen[WEEK_KEY] = r;
-            absorb([], r);
+            absorb({ pad: r });
           });
         }, dropped);
       }
@@ -1002,7 +1166,7 @@ footer {
       var fetchNotes = function () {
         if (!sync) return;
         sync.load().then(function (got) {
-          absorb(got.rows, got.pad);
+          absorb(got);
           status("Shared");
         }).catch(function () { status("Saving on this device"); });
       };
@@ -1063,19 +1227,39 @@ footer {
     sheet = s;
     KEY = "klozar:" + sheet.week;
     BASE = "klozar:base:" + sheet.week;
-    try {
-      state = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
-    } catch (e) {
-      state = {};
+
+    var read = function (k, fallback) {
+      try { return JSON.parse(localStorage.getItem(k) || fallback) || JSON.parse(fallback); }
+      catch (e) { return JSON.parse(fallback); }
+    };
+
+    // The week's half and the sentence-notes half come back separately and are
+    // reassembled into one object per sentence. A blob written by the older page
+    // carried its notes under the week; picking `note` up here means an upgrade
+    // keeps them on screen rather than blanking until the first poll.
+    state = {};
+    var weekState = read(KEY, "{}"), noteState = read(NOTES_KEY, "{}"), id;
+    for (id in weekState) {
+      var v = weekState[id] || {};
+      state[id] = { note: v.note || "", covered: !!v.covered };
     }
-    try {
-      // Its own key rather than a field inside `state`: a page that saved
-      // before this existed still reads back cleanly, it just starts with no
-      // ancestor and adopts the store's on the first poll.
-      shadow = JSON.parse(localStorage.getItem(BASE) || "{}") || {};
-    } catch (e) {
-      shadow = {};
+    for (id in noteState) {
+      if (!state[id]) state[id] = { note: "", covered: false };
+      state[id].note = noteState[id];
     }
+
+    // Ancestors keep their own keys. Anything from the older page is keyed by a
+    // bare sentence id, which is neither shape, so it is dropped — the first
+    // poll then adopts the store's revision, which is the safe direction.
+    shadow = {};
+    var weekBase = read(BASE, "{}"), noteBase = read(NOTES_BASE, "{}"), k;
+    for (k in weekBase) {
+      if (k === WEEK_KEY || k.indexOf("t:") === 0) shadow[k] = weekBase[k];
+    }
+    for (k in noteBase) if (k.indexOf("n:") === 0) shadow[k] = noteBase[k];
+
+    prior = {};
+    read(PRIOR_KEY, "[]").forEach(function (x) { prior[x] = true; });
     pageIds = {};
     // Recency is measured from the newest day *in the sheet*, not from today,
     // so an old week reopened in December still ranks the way it did when it
@@ -1156,7 +1340,8 @@ footer {
       saveLocal();
       render();
       countCovered();
-      cleared.forEach(flush);
+      cleared.forEach(function (id) { flush(tickKey(id)); });
+      showLegend();
     });
 
     buildPicker();
