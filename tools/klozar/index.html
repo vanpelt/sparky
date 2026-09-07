@@ -287,8 +287,13 @@ footer {
   var CONFIG = JSON.parse(document.getElementById("klozar-config").textContent);
   var BAKED = JSON.parse(document.getElementById("lesson-data").textContent);
 
-  var sheet, KEY, state = {}, pageIds = {}, sync = null;
-  var inflight = {}, queued = {};
+  // Three views of every note. `state` is what this browser shows and edits.
+  // `shadow` is the last version we know the store held — the common ancestor a
+  // three-way merge needs, plus the `rev` a write has to match to be accepted.
+  // The store itself is the third. Without the ancestor, reconciling two edits
+  // is guesswork; with it, most pairs of edits merge with nobody noticing.
+  var sheet, KEY, BASE, state = {}, shadow = {}, pageIds = {}, sync = null;
+  var inflight = {}, queued = {}, timers = {};
   var savingEl = document.getElementById("saving");
 
   // How the sheet is read — the ordering and the starred filter — is a habit,
@@ -335,17 +340,36 @@ footer {
   }
 
   function showPad() {
-    if (padEl === document.activeElement) return;   // mid-sentence, leave it be
-    padEl.value = entry(WEEK_KEY).note;
+    patch(padEl, entry(WEEK_KEY).note);
     growPad();
+  }
+
+  function ancestor(id) {
+    if (!shadow[id]) shadow[id] = { note: "", covered: false, rev: 0 };
+    return shadow[id];
   }
 
   function saveLocal() {
     try {
       localStorage.setItem(KEY, JSON.stringify(state));
+      localStorage.setItem(BASE, JSON.stringify(shadow));
     } catch (e) {
       /* private window, full quota — the page still works, just forgets */
     }
+  }
+
+  // One write per thought was right when only one person typed. With two, text
+  // that lives only in your browser until you leave the field is text the other
+  // person is about to overwrite, so a pause in typing is enough to publish.
+  function nudge(id) {
+    saveLocal();
+    if (timers[id]) clearTimeout(timers[id]);
+    timers[id] = setTimeout(function () { delete timers[id]; push(id); }, 800);
+  }
+
+  function flush(id) {
+    if (timers[id]) { clearTimeout(timers[id]); delete timers[id]; }
+    push(id);
   }
 
   // One write in flight per sentence. Ticking a box and then typing a note fires
@@ -354,51 +378,254 @@ footer {
   // ate a note the first time this was tested. A second change while a save is
   // out just sets a flag; the re-run reads current state, so only the latest
   // wins and intermediate values never need their own request.
+  //
+  // The write itself is a compare-and-swap on `rev`: it only lands if the store
+  // is still on the revision this browser last saw. Losing the race is normal,
+  // not an error — the answer carries whatever is actually there, which gets
+  // merged into what is on screen and written back on the next attempt. So an
+  // edit is never replaced by one that never saw it.
   function push(id) {
     saveLocal();
     if (!sync) return;
     if (inflight[id]) { queued[id] = true; return; }
-    var run = function () {
-      inflight[id] = sync.save(id)
-        .then(function () { status("Shared"); })
-        .catch(function () { status("Saved on this device"); })
-        .then(function () {
-          delete inflight[id];
-          if (queued[id]) { delete queued[id]; run(); }
-        });
+
+    var marked = false;
+    var attempt = function (tries) {
+      return sync.save(id, ancestor(id).rev).then(function (res) {
+        if (res && res.ok) {
+          var e = entry(id);
+          shadow[id] = { note: e.note, covered: !!e.covered, rev: res.rev };
+          saveLocal();
+          // Markers in the text need saying out loud, or they read as corruption.
+          status(marked ? "Both edited — kept both" : "Shared");
+          return;
+        }
+        // Somebody wrote between our read and our write. Fold their version in
+        // and go again from their revision rather than picking a winner.
+        var merged = absorbOne(id, res && res.remote);
+        if (merged && merged.conflict) marked = true;
+        applyOne(id);
+        if (tries > 0) return attempt(tries - 1);
+        status(marked ? "Both edited — kept both" : "Saved on this device");
+      });
     };
-    run();
+
+    inflight[id] = attempt(3)
+      .catch(function () { status("Saved on this device"); })
+      .then(function () {
+        delete inflight[id];
+        if (queued[id]) { delete queued[id]; push(id); }
+      });
   }
 
-  function mergeWeek(note) {
-    if (inflight[WEEK_KEY] || queued[WEEK_KEY]) return;   // a newer write is out
-    var e = entry(WEEK_KEY);
-    if (e.note === (note || "")) return;
-    e.note = note || "";
+  // Reconcile one key against the store's version of it. Returns null when
+  // there was nothing to do, so callers know whether to touch the DOM.
+  function absorbOne(id, remote) {
+    if (!remote) return null;
+    var e = entry(id), b = ancestor(id);
+    var adopt = function () {
+      shadow[id] = { note: remote.note || "", covered: !!remote.covered, rev: remote.rev };
+    };
+
+    // Already agreed — take their revision so the next write has the right base.
+    // This is also what a browser upgrading from the pre-`rev` page does.
+    if (e.note === (remote.note || "") && !!e.covered === !!remote.covered) {
+      adopt(); saveLocal(); return null;
+    }
+    if (remote.rev === b.rev && (remote.note || "") === b.note) return null;  // nothing new
+
+    var result = { conflict: false };
+    if (e.note === b.note && !!e.covered === !!b.covered) {
+      e.note = remote.note || "";                 // no local edits — fast-forward
+      e.covered = !!remote.covered;
+    } else {
+      var m = merge3(b.note, e.note, remote.note || "");
+      e.note = m.text;
+      result.conflict = m.conflict;
+      // A tick is one bit: whoever moved it off the ancestor wins, and if both
+      // moved it they necessarily agree.
+      e.covered = (!!e.covered !== !!b.covered) ? !!e.covered : !!remote.covered;
+    }
+    adopt();
     saveLocal();
-    showPad();
+    return result;
   }
 
-  function merge(rows) {
-    var touched = false;
+  function applyOne(id) {
+    if (id === WEEK_KEY) showPad(); else reflect(id);
+  }
+
+  // Everything the store just told us, in one pass. `pad` may be null.
+  function absorb(rows, pad) {
+    var touched = [], owed = [], marked = false;
+    var take = function (id, remote) {
+      // A response is on the wire for this key; it will set the ancestor when it
+      // lands, and reconciling against a stale read now would corrupt it.
+      if (inflight[id] || queued[id]) return;
+      var merged = absorbOne(id, remote);
+      if (!merged) return;
+      if (merged.conflict) marked = true;
+      touched.push(id);
+      var e = entry(id);
+      // A merge can produce text neither side has yet. That has to go back.
+      if (e.note !== (remote.note || "") || !!e.covered !== !!remote.covered) owed.push(id);
+    };
+
     rows.forEach(function (r) {
-      // A poll can return a row we are mid-way through replacing. Taking it
-      // would revert what was just typed, and the queued save would then write
-      // the reverted value back out.
-      if (inflight[r.id] || queued[r.id]) return;
-      var mine = entry(r.id);
-      if (mine.note !== r.note || mine.covered !== r.covered) {
-        mine.note = r.note;
-        mine.covered = r.covered;
-        touched = true;
-      }
+      take(r.id, { note: r.note, covered: r.covered, rev: r.rev });
     });
-    if (!touched) return false;
-    saveLocal();
-    // Never redraw out from under someone mid-sentence.
-    if (!document.querySelector("textarea:focus")) render();
+    if (pad) take(WEEK_KEY, pad);
+
+    if (!touched.length) return false;
+    touched.forEach(applyOne);
     countCovered();
+    owed.forEach(push);
+    if (marked) status("Both edited — kept both");
     return true;
+  }
+
+  // --- merging two people's text ----------------------------------------
+  //
+  // A line-level three-way merge. Each side's edits are expressed as hunks
+  // against the common ancestor. Where the two sides touched different parts,
+  // both changes apply and nobody sees anything. Where both appended at the
+  // same point — the usual case, two people adding notes during one lesson —
+  // both blocks are kept in a stable order rather than called a disagreement.
+  // Only a genuine overlap, both rewriting the same lines differently, keeps
+  // both copies and labels them.
+
+  var MARK_MINE = "[both edited — yours]";
+  var MARK_THEIRS = "[both edited — theirs]";
+  var MARK_END = "[end]";
+
+  function splitLines(t) { return t ? String(t).split("\n") : []; }
+
+  function pushAll(into, xs) {
+    for (var i = 0; i < xs.length; i++) into.push(xs[i]);
+  }
+
+  // Matched line pairs between two versions. The texts are a handful of lines,
+  // so the quadratic table costs nothing and saves a lot of subtlety.
+  function lcs(a, b) {
+    var m = a.length, n = b.length, i, j, dp = [];
+    for (i = 0; i <= m; i++) {
+      var row = [];
+      for (j = 0; j <= n; j++) row.push(0);
+      dp.push(row);
+    }
+    for (i = m - 1; i >= 0; i--) {
+      for (j = n - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1
+                                 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    var pairs = [];
+    i = 0; j = 0;
+    while (i < m && j < n) {
+      if (a[i] === b[j]) { pairs.push([i, j]); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+      else j++;
+    }
+    return pairs;
+  }
+
+  // What `other` did to `base`, in base coordinates, carrying the matching
+  // range in `other` so the region can be read back out of it later.
+  function hunks(base, other) {
+    var pairs = lcs(base, other);
+    pairs.push([base.length, other.length]);          // sentinel, closes the tail
+    var out = [], bi = 0, oi = 0;
+    pairs.forEach(function (p) {
+      if (p[0] > bi || p[1] > oi) {
+        out.push({ start: bi, end: p[0], oStart: oi, oEnd: p[1] });
+      }
+      bi = p[0] + 1; oi = p[1] + 1;
+    });
+    return out;
+  }
+
+  function merge3(baseText, mineText, theirsText) {
+    if (mineText === theirsText) return { text: mineText, conflict: false };
+    var base = splitLines(baseText);
+    var mine = splitLines(mineText);
+    var theirs = splitLines(theirsText);
+    var A = hunks(base, mine), B = hunks(base, theirs);
+    var out = [], conflict = false, pos = 0, ai = 0, bi = 0;
+
+    // The side's own text for base lines [lo, hi). Outside its hunks the two
+    // line up one-for-one, which is what makes the offsets below exact.
+    function region(side, hs, from, to, lo, hi) {
+      if (from === to) return base.slice(lo, hi);
+      var first = hs[from], last = hs[to - 1];
+      return side.slice(first.oStart - (first.start - lo), last.oEnd + (hi - last.end));
+    }
+
+    while (pos < base.length || ai < A.length || bi < B.length) {
+      var aStart = ai < A.length ? A[ai].start : Infinity;
+      var bStart = bi < B.length ? B[bi].start : Infinity;
+
+      if (aStart > pos && bStart > pos) {                 // untouched by both
+        var next = Math.min(aStart, bStart, base.length);
+        if (next <= pos) break;
+        while (pos < next) { out.push(base[pos]); pos++; }
+        continue;
+      }
+
+      // Seed the region with every hunk that begins exactly here, then grow it
+      // only over hunks that genuinely overlap what has been taken. A hunk that
+      // merely starts where this one ends is adjacent, not conflicting — that
+      // is the difference between "you reworded a line and they added one after
+      // it", which merges silently, and two people rewriting the same lines.
+      var lo = pos, hi = pos, a0 = ai, b0 = bi;
+      while (ai < A.length && A[ai].start === pos) { hi = Math.max(hi, A[ai].end); ai++; }
+      while (bi < B.length && B[bi].start === pos) { hi = Math.max(hi, B[bi].end); bi++; }
+      var grew = true;
+      while (grew) {
+        grew = false;
+        while (ai < A.length && A[ai].start < hi) { hi = Math.max(hi, A[ai].end); ai++; grew = true; }
+        while (bi < B.length && B[bi].start < hi) { hi = Math.max(hi, B[bi].end); bi++; grew = true; }
+      }
+
+      var mineR = region(mine, A, a0, ai, lo, hi);
+      var theirR = region(theirs, B, b0, bi, lo, hi);
+
+      if (mineR.join("\n") === theirR.join("\n")) pushAll(out, mineR);
+      else if (a0 === ai) pushAll(out, theirR);          // only they changed it
+      else if (b0 === bi) pushAll(out, mineR);           // only I changed it
+      else if (lo === hi) {                              // both appended here
+        pushAll(out, mineR);
+        pushAll(out, theirR);
+      } else {
+        conflict = true;
+        out.push(MARK_MINE); pushAll(out, mineR);
+        out.push(MARK_THEIRS); pushAll(out, theirR);
+        out.push(MARK_END);
+      }
+      pos = hi;
+    }
+    return { text: out.join("\n"), conflict: conflict };
+  }
+
+  // Replace a textarea's text without throwing the caret to the end — the whole
+  // point of applying someone else's edit while you are still typing.
+  function patch(ta, next) {
+    var prev = ta.value;
+    if (prev === next) return;
+    if (ta !== document.activeElement) { ta.value = next; return; }
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var p = 0;
+    while (p < prev.length && p < next.length && prev.charAt(p) === next.charAt(p)) p++;
+    var s = 0;
+    while (s < prev.length - p && s < next.length - p &&
+           prev.charAt(prev.length - 1 - s) === next.charAt(next.length - 1 - s)) s++;
+    var delta = next.length - prev.length;
+    var map = function (pos) {
+      if (pos <= p) return pos;                          // ahead of the change
+      if (pos >= prev.length - s) return pos + delta;    // behind it
+      return p;                                          // inside it
+    };
+    ta.value = next;
+    ta.setSelectionRange(map(start), map(end));
   }
 
   // --- rendering ---
@@ -458,26 +685,25 @@ footer {
   }
 
   // A sentence can be on the page more than once — missed *and* starred, new
-  // *and* starred. `state` is keyed by sentence id, so ticking one copy always
-  // recorded the right thing; it was the other copies' controls that sat stale
-  // until something forced a re-render. Push the state back out to all of them.
-  function reflect(id, source) {
+  // *and* starred. `state` is keyed by sentence id, so editing one copy always
+  // recorded the right thing; it was the other copies' controls that sat stale.
+  // This also lands remote edits, so every copy is patched rather than assigned
+  // and a box someone is typing in keeps its caret.
+  function reflect(id) {
     var e = entry(id);
     var rows = document.querySelectorAll('.row[data-id="' + id + '"]');
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
-      if (row === source) continue;   // the copy being interacted with
       row.classList.toggle("is-covered", !!e.covered);
-      row.querySelector(".tick").checked = !!e.covered;
+      var tick = row.querySelector(".tick");
+      if (tick !== document.activeElement) tick.checked = !!e.covered;
       var btn = row.querySelector(".notebtn");
       btn.classList.toggle("has-note", !!e.note);
       btn.textContent = e.note ? "note" : "+ note";
-      var ta = row.querySelector("textarea");
-      // Never write over a copy someone has open and is typing into.
-      if (ta !== document.activeElement) {
-        ta.value = e.note;
-        row.querySelector(".note").hidden = !e.note;
-      }
+      patch(row.querySelector("textarea"), e.note);
+      // Open a panel that has something in it; never close one out from under
+      // whoever opened it to type.
+      if (e.note) row.querySelector(".note").hidden = false;
     }
   }
 
@@ -516,10 +742,9 @@ footer {
 
     tick.addEventListener("change", function () {
       entry(s.id).covered = tick.checked;
-      row.classList.toggle("is-covered", tick.checked);
-      reflect(s.id, row);
+      reflect(s.id);
       countCovered();
-      push(s.id);
+      flush(s.id);
     });
 
     btn.addEventListener("click", function () {
@@ -527,15 +752,21 @@ footer {
       if (!note.hidden) ta.focus();
     });
 
-    // Save on blur, not per keystroke — one write per thought, not per letter.
+    // The buffer and `state` stay identical keystroke by keystroke, so a remote
+    // edit arriving mid-word merges against what is actually on screen. Only
+    // the network write waits for a pause.
+    ta.addEventListener("input", function () {
+      entry(s.id).note = ta.value;
+      reflect(s.id);
+      nudge(s.id);
+    });
+
     ta.addEventListener("blur", function () {
       var v = ta.value.trim();
-      if (v === entry(s.id).note) return;
+      if (v === entry(s.id).note && !timers[s.id]) return;
       entry(s.id).note = v;
-      btn.classList.toggle("has-note", !!v);
-      btn.textContent = v ? "note" : "+ note";
-      reflect(s.id, row);
-      push(s.id);
+      reflect(s.id);
+      flush(s.id);
     });
 
     row.dataset.id = s.id;
@@ -655,31 +886,55 @@ footer {
     }
 
     return {
-      save: function (id) {
+      // The write and a read-back ride one pipeline. `affected_row_count` is 0
+      // when the guard rejected the write, and the read then says what is
+      // actually stored — so a lost race costs no extra round trip.
+      save: function (id, baseRev) {
         var e = entry(id);
         var now = T(new Date().toISOString());
+        var write, read;
         if (id === WEEK_KEY) {
-          return pipeline([{
-            sql: "insert into week_notes(week, note, updated_at) values(?,?,?) " +
-                 "on conflict(week) do update set " +
-                 "note=excluded.note, updated_at=excluded.updated_at",
-            args: [T(sheet.week), T(e.note || ""), now]
-          }]);
+          write = {
+            sql: "insert into week_notes(week, note, updated_at, rev) values(?,?,?,1) " +
+                 "on conflict(week) do update set note=excluded.note, " +
+                 "updated_at=excluded.updated_at, rev=week_notes.rev+1 " +
+                 "where week_notes.rev = ?",
+            args: [T(sheet.week), T(e.note || ""), now, I(baseRev)]
+          };
+          read = { sql: "select note, 0, rev from week_notes where week = ?",
+                   args: [T(sheet.week)] };
+        } else {
+          write = {
+            sql: "insert into notes(week, sentence_id, note, covered, updated_at, rev) " +
+                 "values(?,?,?,?,?,1) on conflict(week, sentence_id) do update set " +
+                 "note=excluded.note, covered=excluded.covered, " +
+                 "updated_at=excluded.updated_at, rev=notes.rev+1 " +
+                 "where notes.rev = ?",
+            args: [T(sheet.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0), now, I(baseRev)]
+          };
+          read = { sql: "select note, covered, rev from notes where week = ? and sentence_id = ?",
+                   args: [T(sheet.week), T(id)] };
         }
-        return pipeline([{
-          sql: "insert into notes(week, sentence_id, note, covered, updated_at) " +
-               "values(?,?,?,?,?) on conflict(week, sentence_id) do update set " +
-               "note=excluded.note, covered=excluded.covered, updated_at=excluded.updated_at",
-          args: [T(sheet.week), T(id), T(e.note || ""), I(e.covered ? 1 : 0), now]
-        }]);
+        return pipeline([write, read]).then(function (results) {
+          var landed = results[0].response.result.affected_row_count > 0;
+          var rows = results[1].response.result.rows;
+          var row = rows.length ? rows[0] : null;
+          var rev = row ? Number(row[2].value) : 0;
+          if (landed) return { ok: true, rev: rev };
+          return { ok: false, remote: {
+            note: row && row[0].type !== "null" ? row[0].value : "",
+            covered: row ? row[1].value === "1" : false,
+            rev: rev
+          } };
+        });
       },
       // Both reads ride one pipeline: two round trips every 15s to say "nothing
       // changed" is twice the free tier for no gain.
       load: function () {
         return pipeline([
-          { sql: "select sentence_id, note, covered from notes where week = ?",
+          { sql: "select sentence_id, note, covered, rev from notes where week = ?",
             args: [T(sheet.week)] },
-          { sql: "select note from week_notes where week = ?",
+          { sql: "select note, rev from week_notes where week = ?",
             args: [T(sheet.week)] }
         ]).then(function (results) {
           var text = function (c) { return c.type === "null" ? "" : c.value; };
@@ -689,10 +944,13 @@ footer {
               return {
                 id: row[0].value,
                 note: text(row[1]),
-                covered: row[2].value === "1"
+                covered: row[2].value === "1",
+                rev: Number(row[3].value)
               };
             }),
-            pad: padRows.length ? text(padRows[0][0]) : ""
+            pad: padRows.length
+              ? { note: text(padRows[0][0]), covered: false, rev: Number(padRows[0][1].value) }
+              : null
           };
         });
       }
@@ -702,29 +960,48 @@ footer {
   function artifactBackend(db) {
     var items = function () { return db.collection("lessons/" + sheet.week + "/items"); };
     var meta = function () { return db.collection("lessons/" + sheet.week + "/meta"); };
+    // The document store has no conditional write, so the guard is checked
+    // against the newest snapshot instead of inside the write. Narrower than the
+    // SQL compare-and-swap — two writes inside one snapshot interval can still
+    // race — but it refuses any revision this page has not seen, and this copy
+    // is the single-reader preview anyway.
+    var seen = {};
     var dropped = function () {
       sync = null;
       status("Saving on this device");
     };
     return {
-      save: function (id) {
+      save: function (id, baseRev) {
         var e = entry(id);
-        var at = new Date().toISOString();
-        if (id === WEEK_KEY) return meta().doc("notes").set({ note: e.note, at: at });
-        return items().doc(String(id)).set({
-          note: e.note, covered: !!e.covered, at: at
+        var known = seen[id];
+        var rev = known ? known.rev : 0;
+        if (known && rev !== baseRev) {
+          return Promise.resolve({ ok: false, remote: known });
+        }
+        var doc = { note: e.note, covered: !!e.covered, rev: rev + 1,
+                    at: new Date().toISOString() };
+        var ref = id === WEEK_KEY ? meta().doc("notes") : items().doc(String(id));
+        return ref.set(doc).then(function () {
+          seen[id] = { note: doc.note, covered: doc.covered, rev: doc.rev };
+          return { ok: true, rev: doc.rev };
         });
       },
       watch: function () {
         items().onSnapshot(function (snap) {
-          merge(snap.docs.map(function (d) {
+          absorb(snap.docs.map(function (d) {
             var b = d.data() || {};
-            return { id: d.id, note: b.note || "", covered: !!b.covered };
-          }));
+            var r = { id: d.id, note: b.note || "", covered: !!b.covered, rev: b.rev || 0 };
+            seen[d.id] = { note: r.note, covered: r.covered, rev: r.rev };
+            return r;
+          }), null);
         }, dropped);
         meta().onSnapshot(function (snap) {
           snap.docs.forEach(function (d) {
-            if (d.id === "notes") mergeWeek((d.data() || {}).note || "");
+            if (d.id !== "notes") return;
+            var b = d.data() || {};
+            var r = { note: b.note || "", covered: false, rev: b.rev || 0 };
+            seen[WEEK_KEY] = r;
+            absorb([], r);
           });
         }, dropped);
       }
@@ -738,8 +1015,7 @@ footer {
       var fetchNotes = function () {
         if (!sync) return;
         sync.load().then(function (got) {
-          merge(got.rows);
-          mergeWeek(got.pad);
+          absorb(got.rows, got.pad);
           status("Shared");
         }).catch(function () { status("Saving on this device"); });
       };
@@ -799,10 +1075,19 @@ footer {
   function start(s) {
     sheet = s;
     KEY = "klozar:" + sheet.week;
+    BASE = "klozar:base:" + sheet.week;
     try {
       state = JSON.parse(localStorage.getItem(KEY) || "{}") || {};
     } catch (e) {
       state = {};
+    }
+    try {
+      // Its own key rather than a field inside `state`: a page that saved
+      // before this existed still reads back cleanly, it just starts with no
+      // ancestor and adopts the store's on the first poll.
+      shadow = JSON.parse(localStorage.getItem(BASE) || "{}") || {};
+    } catch (e) {
+      shadow = {};
     }
     pageIds = {};
     // Recency is measured from the newest day *in the sheet*, not from today,
@@ -831,13 +1116,18 @@ footer {
     countCovered();
     showPad();
 
-    // Same rule as a sentence note: one write per thought, not per letter.
-    padEl.addEventListener("input", growPad);
+    // Same rule as a sentence note: publish on a pause, not on leaving.
+    padEl.addEventListener("input", function () {
+      entry(WEEK_KEY).note = padEl.value;
+      growPad();
+      nudge(WEEK_KEY);
+    });
     padEl.addEventListener("blur", function () {
       var v = padEl.value.trim();
-      if (v === entry(WEEK_KEY).note) return;
+      if (v === entry(WEEK_KEY).note && !timers[WEEK_KEY]) return;
       entry(WEEK_KEY).note = v;
-      push(WEEK_KEY);
+      padEl.value = v;
+      flush(WEEK_KEY);
     });
 
     var sortPick = document.getElementById("sort-pick");
@@ -879,7 +1169,7 @@ footer {
       saveLocal();
       render();
       countCovered();
-      cleared.forEach(push);
+      cleared.forEach(flush);
     });
 
     buildPicker();

@@ -3,8 +3,8 @@
   "url": "https://klozar-vanpelt.aws-us-east-1.turso.io",
   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODgzNzE0MjYsImlkIjoiMDFhMDYzM2UtMWIxMC03MzhiLTkyYzItMjBkZGZmZmQ1YTk4Iiwia2lkIjoiSTQ0Q0RzUmdnbTZaeG43Z0w5azBWY0VIcG9KY1ZyRmZkd2JXT3Z2anlvdyIsInJpZCI6ImE0ZDZiOGM3LTlmMjktNGQ3OS1hYjAzLTczNGM3ZDQ5MzA3MSJ9.NQNw1hJwPjVjqzQctXGeiKD6ssBQxCAYDIngievzcpxVwtklZ3KG7Wovo3vd-50HbdNkiQ6Qg2DJIoFQjfGlCQ",
   "schema": [
-    "create table if not exists notes (week text not null, sentence_id text not null, note text not null default '', covered integer not null default 0, updated_at text not null, primary key (week, sentence_id))",
-    "create table if not exists week_notes (week text not null primary key, note text not null default '', updated_at text not null)"
+    "create table if not exists notes (week text not null, sentence_id text not null, note text not null default '', covered integer not null default 0, updated_at text not null, rev integer not null default 0, primary key (week, sentence_id))",
+    "create table if not exists week_notes (week text not null primary key, note text not null default '', updated_at text not null, rev integer not null default 0)"
   ],
-  "_schema_note": "Applied by hand against the live database, not by any code here — the page only ever reads and writes, never migrates. Add the DDL above before publishing a page that depends on it; both statements are idempotent."
+  "_schema_note": "Applied by hand against the live database, not by any code here — the page only ever reads and writes, never migrates. Add the DDL above before publishing a page that depends on it; both statements are idempotent. On a database that predates the rev column, run 'alter table notes add column rev integer not null default 0' and the same for week_notes; rows written by the older page sit at rev 0, which the current page accepts as an ancestor and moves to 1 on the first edit. rev is the compare-and-swap guard: a write only lands if the row is still on the revision that browser last read, which is what makes it impossible to replace an edit you never saw."
 }
