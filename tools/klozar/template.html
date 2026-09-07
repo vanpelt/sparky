@@ -397,6 +397,30 @@ footer {
     return ORDERS[0];
   }
 
+  // A sentence can be on the page more than once — missed *and* starred, new
+  // *and* starred. `state` is keyed by sentence id, so ticking one copy always
+  // recorded the right thing; it was the other copies' controls that sat stale
+  // until something forced a re-render. Push the state back out to all of them.
+  function reflect(id, source) {
+    var e = entry(id);
+    var rows = document.querySelectorAll('.row[data-id="' + id + '"]');
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (row === source) continue;   // the copy being interacted with
+      row.classList.toggle("is-covered", !!e.covered);
+      row.querySelector(".tick").checked = !!e.covered;
+      var btn = row.querySelector(".notebtn");
+      btn.classList.toggle("has-note", !!e.note);
+      btn.textContent = e.note ? "note" : "+ note";
+      var ta = row.querySelector("textarea");
+      // Never write over a copy someone has open and is typing into.
+      if (ta !== document.activeElement) {
+        ta.value = e.note;
+        row.querySelector(".note").hidden = !e.note;
+      }
+    }
+  }
+
   function rowEl(s) {
     var e = entry(s.id);
     var row = document.createElement("div");
@@ -433,6 +457,7 @@ footer {
     tick.addEventListener("change", function () {
       entry(s.id).covered = tick.checked;
       row.classList.toggle("is-covered", tick.checked);
+      reflect(s.id, row);
       countCovered();
       push(s.id);
     });
@@ -449,6 +474,7 @@ footer {
       entry(s.id).note = v;
       btn.classList.toggle("has-note", !!v);
       btn.textContent = v ? "note" : "+ note";
+      reflect(s.id, row);
       push(s.id);
     });
 
