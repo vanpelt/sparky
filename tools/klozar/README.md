@@ -96,8 +96,9 @@ about 9 KB over the wire, since Pages gzips it.
 ## The interactive sheet
 
 `artifact` bakes the week into `template.html` and writes a self-contained page:
-translations hide for drilling, each sentence takes a note, and ticking one off
-tracks what the hour actually got through. Ask Claude to publish the file with the
+translations hide for drilling, each sentence takes a note, a **Lesson notes** pad
+above the sheet takes everything that belongs to no single sentence, and ticking
+one off tracks what the hour actually got through. Ask Claude to publish the file with the
 Artifact tool (`capabilities: {db: {}}`) and you get a link.
 
 Persistence is two-tiered on purpose. Every change writes to `localStorage`
@@ -123,7 +124,7 @@ Lesson notes are never baked into the file.
 
 ### Shared notes
 
-Notes and ticks sync through a **Turso** database that the page talks to directly
+Notes, ticks and the week's Lesson notes pad sync through a **Turso** database that the page talks to directly
 over its HTTP protocol — plain JSON `POST`s to `/v2/pipeline`, so there's no
 client library and nothing loaded from a CDN. Turso answers with
 `access-control-allow-origin: *`, which is what makes a static page able to reach
@@ -172,6 +173,16 @@ The sheets stay in git rather than the database on purpose. They're the record �
 append-only, versioned, restorable — and the page's Turso token is public and
 read-write, so putting them there would mean anyone with the link could erase the
 archive rather than just this week's notes.
+
+Two tables, and the page never creates either — `notes` holds one row per
+sentence, `week_notes` one row per week for the pad. The DDL for both lives in
+`notes-backend.json`; apply it by hand before publishing a page that depends on
+it. Both statements are `if not exists`, so re-running them is free.
+
+The pad is not a second sync system. It rides the per-sentence machinery under
+the reserved key `__week__`, which no sentence id can collide with, so it inherits
+the coalescing, the localStorage fallback and the don't-clobber-what's-being-typed
+rule rather than growing a subtly different copy of each.
 
 Two details worth keeping if you touch the sync code:
 
