@@ -398,6 +398,9 @@ footer {
     var week = {}, notes = {}, weekBase = {}, noteBase = {}, id, k;
     for (id in state) {
       if (id === WEEK_KEY) { week[id] = { note: state[id].note }; continue; }
+      // An older page could leave a sync key in `state`; it is not a sentence
+      // and writing it back out would keep it alive forever.
+      if (id.indexOf(":") >= 0) continue;
       week[id] = { covered: !!state[id].covered };
       if (state[id].note) notes[id] = state[id].note;
     }
@@ -453,7 +456,10 @@ footer {
     var attempt = function (tries) {
       return sync.save(id, ancestor(id).rev).then(function (res) {
         if (res && res.ok) {
-          var e = entry(id);
+          // `id` here is a sync key, not a sentence id — `entry()` would invent
+          // a blank one and record the ancestor as empty text at the new
+          // revision, which is the blank base that let two appends duplicate.
+          var e = readCell(id);
           shadow[id] = { note: e.note, covered: !!e.covered, rev: res.rev };
           saveLocal();
           // Markers in the text need saying out loud, or they read as corruption.
@@ -486,6 +492,12 @@ footer {
     var adopt = function () {
       shadow[key] = { note: remote.note || "", covered: !!remote.covered, rev: remote.rev };
     };
+
+    // Revisions only ever move forward. A poll issued before this browser's last
+    // write can land after it, and taking that answer would rewind the ancestor
+    // to a version of the text that has already been superseded — which is how a
+    // note ends up being merged against a stale copy of itself.
+    if (remote.rev < b.rev) return null;
 
     // Already agreed — take their revision so the next write has the right base.
     // This is also what a browser upgrading from the pre-`rev` page does.
@@ -523,8 +535,11 @@ footer {
     var touched = [], owed = [], marked = false;
     var take = function (key, remote) {
       // A response is on the wire for this key; it will set the ancestor when it
-      // lands, and reconciling against a stale read now would corrupt it.
-      if (inflight[key] || queued[key]) return;
+      // lands, and reconciling against a stale read now would corrupt it. A
+      // pending `timers` entry means the same thing one step earlier: someone is
+      // typing here and the store has not been told yet, so anything it says
+      // about this key predates what is on screen.
+      if (inflight[key] || queued[key] || timers[key]) return;
       var merged = absorbOne(key, remote);
       if (!merged) return;
       if (merged.conflict) marked = true;
@@ -572,124 +587,101 @@ footer {
 
   // --- merging two people's text ----------------------------------------
   //
-  // A line-level three-way merge. Each side's edits are expressed as hunks
-  // against the common ancestor. Where the two sides touched different parts,
-  // both changes apply and nobody sees anything. Where both appended at the
-  // same point — the usual case, two people adding notes during one lesson —
-  // both blocks are kept in a stable order rather than called a disagreement.
-  // Only a genuine overlap, both rewriting the same lines differently, keeps
-  // both copies and labels them.
-
-  var MARK_MINE = "[both edited — yours]";
-  var MARK_THEIRS = "[both edited — theirs]";
-  var MARK_END = "[end]";
+  // This used to be a line-level three-way merge over an LCS, and it corrupted
+  // notes in the field: one sentence reached rev 47 carrying four copies of
+  // itself, interleaved with fragments cut off mid-word. Any merge that decides
+  // *where* text goes has to answer whether two blocks are one edit seen twice
+  // or two different edits, and against an ancestor that had rewound — a stale
+  // poll, a write still on the wire — it always answered "two", and appended a
+  // second copy. The two browsers then appended in opposite orders, so every
+  // exchange produced a fresh text for the other to merge again, silently.
+  //
+  // What replaced it cannot duplicate anything, because it never counts a line
+  // twice. A note is a handful of lines, so the question is answerable on the
+  // set of them: if one side's lines all appear on the other side, that side has
+  // nothing to add and the fuller text wins outright — which is the exact shape
+  // of a stale read. Only when each side holds a line the other lacks is
+  // anything combined, and then the result is a union, where a line appears once.
+  //
+  // Converging matters as much as not duplicating. Two browsers merging the same
+  // pair of texts in opposite roles reach the same set of lines in different
+  // orders; left there they would trade versions forever, so the tie goes to the
+  // lexicographically smaller text — a rule both compute identically and neither
+  // side favours.
 
   function splitLines(t) { return t ? String(t).split("\n") : []; }
 
-  function pushAll(into, xs) {
-    for (var i = 0; i < xs.length; i++) into.push(xs[i]);
-  }
-
-  // Matched line pairs between two versions. The texts are a handful of lines,
-  // so the quadratic table costs nothing and saves a lot of subtlety.
-  function lcs(a, b) {
-    var m = a.length, n = b.length, i, j, dp = [];
-    for (i = 0; i <= m; i++) {
-      var row = [];
-      for (j = 0; j <= n; j++) row.push(0);
-      dp.push(row);
-    }
-    for (i = m - 1; i >= 0; i--) {
-      for (j = n - 1; j >= 0; j--) {
-        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1
-                                 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-      }
-    }
-    var pairs = [];
-    i = 0; j = 0;
-    while (i < m && j < n) {
-      if (a[i] === b[j]) { pairs.push([i, j]); i++; j++; }
-      else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
-      else j++;
-    }
-    return pairs;
-  }
-
-  // What `other` did to `base`, in base coordinates, carrying the matching
-  // range in `other` so the region can be read back out of it later.
-  function hunks(base, other) {
-    var pairs = lcs(base, other);
-    pairs.push([base.length, other.length]);          // sentinel, closes the tail
-    var out = [], bi = 0, oi = 0;
-    pairs.forEach(function (p) {
-      if (p[0] > bi || p[1] > oi) {
-        out.push({ start: bi, end: p[0], oStart: oi, oEnd: p[1] });
-      }
-      bi = p[0] + 1; oi = p[1] + 1;
+  // Blank lines are spacing: they repeat legitimately and say nothing about who
+  // wrote what, so they sit out every comparison. `#` keeps a line of text from
+  // colliding with a property name like "constructor".
+  function contentLines(t) {
+    var out = [];
+    splitLines(t).forEach(function (l) {
+      if (l.trim()) out.push(l.trim());
     });
     return out;
   }
 
+  function covers(big, small) {
+    var have = {}, i;
+    for (i = 0; i < big.length; i++) have["#" + big[i]] = true;
+    for (i = 0; i < small.length; i++) {
+      if (have["#" + small[i]]) continue;
+      // A copy that was on the wire while someone kept typing is a prefix of
+      // what they have now, so its *last* line can be half a word. Only the last
+      // one, and only with an earlier line that matched exactly to show this
+      // really is the same text seen earlier — otherwise a note reading "da"
+      // would vanish into someone else's "dakle", which is the kind of quiet
+      // loss this whole merge exists to prevent.
+      if (i === small.length - 1 && i > 0 && endsOpen(big, small[i])) continue;
+      return false;
+    }
+    return true;
+  }
+
+  function endsOpen(big, partial) {
+    for (var i = 0; i < big.length; i++) {
+      if (big[i].length > partial.length && big[i].indexOf(partial) === 0) return true;
+    }
+    return false;
+  }
+
+  // Both sides' lines, each one once, mine first. Runs of blank lines collapse
+  // rather than accumulating a little more padding on every exchange.
+  function union(mineText, theirsText) {
+    var out = [], seen = {};
+    var add = function (t) {
+      splitLines(t).forEach(function (l) {
+        var k = l.trim();
+        if (!k) {
+          if (out.length && out[out.length - 1].trim()) out.push("");
+          return;
+        }
+        if (seen["#" + k]) return;
+        seen["#" + k] = true;
+        out.push(l);
+      });
+    };
+    add(mineText);
+    add(theirsText);
+    while (out.length && !out[out.length - 1].trim()) out.pop();
+    return out.join("\n");
+  }
+
   function merge3(baseText, mineText, theirsText) {
-    if (mineText === theirsText) return { text: mineText, conflict: false };
-    var base = splitLines(baseText);
-    var mine = splitLines(mineText);
-    var theirs = splitLines(theirsText);
-    var A = hunks(base, mine), B = hunks(base, theirs);
-    var out = [], conflict = false, pos = 0, ai = 0, bi = 0;
+    var base = baseText || "", mine = mineText || "", theirs = theirsText || "";
+    if (mine === theirs) return { text: mine, conflict: false };
+    if (mine === base) return { text: theirs, conflict: false };   // only they moved
+    if (theirs === base) return { text: mine, conflict: false };   // only I moved
 
-    // The side's own text for base lines [lo, hi). Outside its hunks the two
-    // line up one-for-one, which is what makes the offsets below exact.
-    function region(side, hs, from, to, lo, hi) {
-      if (from === to) return base.slice(lo, hi);
-      var first = hs[from], last = hs[to - 1];
-      return side.slice(first.oStart - (first.start - lo), last.oEnd + (hi - last.end));
+    var a = contentLines(mine), b = contentLines(theirs);
+    var mineHasTheirs = covers(a, b), theirsHasMine = covers(b, a);
+    if (mineHasTheirs && theirsHasMine) {
+      return { text: mine < theirs ? mine : theirs, conflict: false };
     }
-
-    while (pos < base.length || ai < A.length || bi < B.length) {
-      var aStart = ai < A.length ? A[ai].start : Infinity;
-      var bStart = bi < B.length ? B[bi].start : Infinity;
-
-      if (aStart > pos && bStart > pos) {                 // untouched by both
-        var next = Math.min(aStart, bStart, base.length);
-        if (next <= pos) break;
-        while (pos < next) { out.push(base[pos]); pos++; }
-        continue;
-      }
-
-      // Seed the region with every hunk that begins exactly here, then grow it
-      // only over hunks that genuinely overlap what has been taken. A hunk that
-      // merely starts where this one ends is adjacent, not conflicting — that
-      // is the difference between "you reworded a line and they added one after
-      // it", which merges silently, and two people rewriting the same lines.
-      var lo = pos, hi = pos, a0 = ai, b0 = bi;
-      while (ai < A.length && A[ai].start === pos) { hi = Math.max(hi, A[ai].end); ai++; }
-      while (bi < B.length && B[bi].start === pos) { hi = Math.max(hi, B[bi].end); bi++; }
-      var grew = true;
-      while (grew) {
-        grew = false;
-        while (ai < A.length && A[ai].start < hi) { hi = Math.max(hi, A[ai].end); ai++; grew = true; }
-        while (bi < B.length && B[bi].start < hi) { hi = Math.max(hi, B[bi].end); bi++; grew = true; }
-      }
-
-      var mineR = region(mine, A, a0, ai, lo, hi);
-      var theirR = region(theirs, B, b0, bi, lo, hi);
-
-      if (mineR.join("\n") === theirR.join("\n")) pushAll(out, mineR);
-      else if (a0 === ai) pushAll(out, theirR);          // only they changed it
-      else if (b0 === bi) pushAll(out, mineR);           // only I changed it
-      else if (lo === hi) {                              // both appended here
-        pushAll(out, mineR);
-        pushAll(out, theirR);
-      } else {
-        conflict = true;
-        out.push(MARK_MINE); pushAll(out, mineR);
-        out.push(MARK_THEIRS); pushAll(out, theirR);
-        out.push(MARK_END);
-      }
-      pos = hi;
-    }
-    return { text: out.join("\n"), conflict: conflict };
+    if (mineHasTheirs) return { text: mine, conflict: false };
+    if (theirsHasMine) return { text: theirs, conflict: false };
+    return { text: union(mine, theirs), conflict: true };
   }
 
   // Replace a textarea's text without throwing the caret to the end — the whole

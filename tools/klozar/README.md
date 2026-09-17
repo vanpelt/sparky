@@ -7,6 +7,7 @@ a tutor.
 ```
 klozar.py        the CLI
 template.html    the interactive sheet, with a /*__DATA__*/ slot for the week
+test-merge.js    `node test-merge.js` — the note merge, lifted out of the page
 refresh.sh       rebuild the published sheet and push it
 index.html       the shell + newest week baked in — committed, served by Pages
 weeks/           one JSON of content per week    — committed, ~15 KB each
@@ -254,16 +255,37 @@ diverge is about a second instead of a whole train of thought.
 `where rev = <the revision this browser last read>`, so a write that would land
 on top of a change you never saw simply doesn't apply — `affected_row_count`
 comes back 0 and the same round trip returns what is actually stored. The page
-then runs a line-level three-way merge between the common ancestor, your text
-and theirs, and retries from their revision. Both edits survive.
+then merges their version into yours and retries from their revision. Both edits
+survive.
 
-Non-overlapping edits merge with nobody noticing, including the ordinary case of
-two people appending different lines. A hunk that merely *starts* where another
-ends counts as adjacent, not conflicting — rewording a line while someone adds
-one after it is not a disagreement. Only a genuine overlap, both rewriting the
-same lines differently, keeps both copies between `[both edited — yours]` /
-`[both edited — theirs]` / `[end]`, and the badge says "Both edited — kept both"
-so the markers don't read as corruption.
+**The merge works on the set of lines, not on where they sit.** If everything one
+side has also appears on the other, that side has nothing to add and the fuller
+text wins outright. Only when each side holds a line the other lacks is anything
+combined, and then the result is a union in which no line appears twice; the
+badge says "Both edited — kept both". Two browsers that reach the same lines in a
+different order settle it by taking the lexicographically smaller text, which
+both compute identically — otherwise they trade versions forever.
+
+This replaced a line-level three-way merge over an LCS, which corrupted notes in
+the field: one sentence reached rev 47 holding four copies of itself, interleaved
+with fragments cut off mid-word, and the badge never said a thing
+(`merge3("", "A", "A\nB")` returned `"A\nA\nB"` with `conflict: false`). A merge
+that decides *where* text goes has to know whether two blocks are one edit seen
+twice or two different edits, and against a rewound ancestor it always guessed
+"two". Both browsers then appended in opposite orders, so each exchange produced a
+new text for the other to merge again. Counting lines instead of placing them
+cannot do that — `node test-merge.js` runs the old failures plus fifty random
+two-writer lessons and checks nothing is ever duplicated or lost.
+
+Two rules keep the ancestor honest, which is what the merge depends on:
+
+- **Revisions only move forward.** A poll issued before your last write can land
+  after it; adopting that answer rewinds the ancestor to text that has already
+  been superseded, and the next keystroke then merges your note against a stale
+  copy of itself. Anything older than the revision already held is dropped.
+- **A poll never touches a key that is mid-edit.** Not just one with a request in
+  flight — one with the 800 ms debounce still pending, too. The store hasn't been
+  told yet, so everything it says about that key predates what is on screen.
 
 Incoming text is applied into a field you are *typing in*, with the caret mapped
 across the change rather than thrown to the end. Dropping remote edits to protect
@@ -297,6 +319,14 @@ Two details worth keeping if you touch the sync code:
   current state, so only the latest wins.
 - **A poll must not take a row that has a write pending**, or it reverts what was
   just typed and the queued save writes the reverted value back out.
+- **Never let a revision go backwards.** Every corruption seen in the live
+  database started as an out-of-order read being accepted as truth; the merge
+  only turned it into duplicated text.
+- **`push()` takes a sync key, not a sentence id**, and so does everything it
+  hands that key to. It used to call `entry()` on it, which invents a blank
+  sentence — so a *successful* write recorded the ancestor as empty text at the
+  new revision, and every reconcile after it merged against a blank base. That
+  is the state in which two appends look like two different edits.
 
 Polling is every 15s and only while the tab is visible.
 
