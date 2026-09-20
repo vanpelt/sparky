@@ -11,7 +11,6 @@
 
 - Python: use `uv` for dependency management, environments, and execution. Python tools should declare dependencies in `pyproject.toml`; use `uv sync` and `uv run`.
 - Node.js: use `pnpm` for packages and scripts.
-- Go: this is not a root Go workspace. Run Go commands from the directory containing the relevant `go.mod` (currently `tools/sparkbox` or `tools/sluice`).
 - Prefer existing scripts, Make targets, and package-local helpers over introducing a new repository-wide toolchain.
 
 ## Change discipline
