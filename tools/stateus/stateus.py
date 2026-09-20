@@ -23,6 +23,7 @@ from shapely.prepared import prep
 
 HERE = Path(__file__).parent
 NYC_GEOJSON = HERE / "nyc_boroughs.geojson"
+NY_STATE_GEOJSON = HERE / "ny_state.geojson"
 
 # Core Data counts seconds from 2001-01-01; unix counts from 1970-01-01.
 COREDATA_EPOCH = 978307200
@@ -35,10 +36,24 @@ DEFAULT_PHOTOS_DB = (
 Obs = namedtuple("Obs", "day lat lng source detail")
 
 
+def _shapes(path):
+    return [shape(f["geometry"]) for f in json.loads(path.read_text())["features"]]
+
+
 def load_nyc():
     """Five-borough boundary, as one prepared geometry."""
-    data = json.loads(NYC_GEOJSON.read_text())
-    return prep(unary_union([shape(f["geometry"]) for f in data["features"]]))
+    return prep(unary_union(_shapes(NYC_GEOJSON)))
+
+
+def load_ny_state():
+    """New York State, unioned with the precise borough polygons.
+
+    The state outline is coarse. Unioning it with the borough shapes means the
+    dense, border-adjacent case (is this Manhattan or is it Hoboken?) is
+    decided by the accurate geometry, while the coarse outline only has to
+    handle upstate and Long Island, where no border is nearby.
+    """
+    return prep(unary_union(_shapes(NY_STATE_GEOJSON) + _shapes(NYC_GEOJSON)))
 
 
 def local_day(utc_seconds: float, tz_offset_seconds):

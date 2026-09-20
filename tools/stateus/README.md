@@ -91,6 +91,23 @@ uv run stateus.py --year 2026
 uv run stateus.py --year 2026 --takeout ~/Downloads/Takeout -o ledger.csv
 ```
 
+## Two different questions
+
+These are not the same count, and mixing them up is the easy mistake:
+
+- **Income allocation** — *weekdays worked in NYC*. Uses the five-borough
+  boundary and only counts weekdays.
+- **Statutory residency (the 183-day test)** — *all days present in New York
+  State*. Weekends count, any part of a day counts, and the whole state
+  counts, not just the city. `load_ny_state()` unions the coarse state outline
+  with the precise borough polygons, so border-adjacent points are still
+  decided by the accurate geometry.
+
+Statutory residency is also a two-prong test: the day count only bites if a
+permanent place of abode in New York is maintained for substantially all of
+the year. It is separate from domicile, which is about intent rather than
+arithmetic.
+
 ## Caveat
 
 This reconstructs a defensible estimate; it is not tax advice. New York
