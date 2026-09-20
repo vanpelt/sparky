@@ -168,6 +168,7 @@ svg .stroke{stroke:var(--home);fill:none;stroke-width:1.6;stroke-linejoin:round}
 .chartWrap{overflow-x:auto}
 .chartWrap svg{display:block;width:100%;min-width:560px;height:auto}
 
+.sizeNote{font-size:13px;color:var(--muted);margin-top:12px;max-width:62ch}
 .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--hair);border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .total{background:var(--surface);padding:12px 15px}
 .total .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
@@ -333,9 +334,10 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
       </div>
     </div>
     <div class="ctl">
-      <span class="k">Storage</span>
-      <div class="seg">
-        <button id="bt" aria-pressed="true">13.5 kWh battery</button>
+      <span class="k">Battery</span>
+      <div class="sizeRow">
+        <input type="range" id="cap" min="0" max="20" step="0.5" value="13.5" aria-label="Battery capacity in kilowatt-hours">
+        <output id="capOut">13.5 kWh</output>
       </div>
     </div>
   </section>
@@ -357,6 +359,17 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
   </section>
 
   <section class="totals" id="totals"></section>
+
+  <section class="card chartCard">
+    <div class="chartHead">
+      <h2>What another kilowatt-hour buys</h2>
+      <div class="legend"><span>Bill saved per day against no battery at all, at these settings</span></div>
+    </div>
+    <div class="chartWrap">
+      <svg id="sizeChart" viewBox="0 0 700 206" role="img" aria-label="Daily bill saving plotted against battery capacity"></svg>
+    </div>
+    <p class="sizeNote" id="sizeNote"></p>
+  </section>
 
   <section class="notes">
     <div class="note">
@@ -385,9 +398,11 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
 <script>
 (function(){
   var STEPS=96, DT=24/STEPS;
-  var CAP=13.5, PMAX=5, RESERVE=0.20, ETA=0.94;
+  var RESERVE=0.20, ETA=0.94, CAP_MAX=20;
   var RATE_IN=0.31, RATE_OUT=0.08;
-  var cfg={kw:8, sky:'clear', ac:false, ev:false, batt:true};
+  var cfg={kw:8, sky:'clear', ac:false, ev:false, cap:13.5};
+  // home packs sit near 0.35C; clamp to what a residential inverter would pass
+  function pmaxFor(c){ return c<=0?0:Math.max(1.2, Math.min(7, c*0.37)); }
   var day=null, idx=53, playing=false;
 
   function bump(h,c,w){var d=h-c;return Math.exp(-(d*d)/(2*w*w));}
@@ -422,18 +437,19 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
     return p;
   }
 
-  function simulate(){
+  function simulate(cap){
+    var pmax=pmaxFor(cap);
     var d={solar:[],dcs:[],load:[],chg:[],dis:[],grid:[],soc:[],clip:[],irr:[]};
-    var soc=CAP*0.26;
+    var soc=cap*0.26;
     for(var i=0;i<STEPS;i++){
       var h=i*DT, s=solarAt(h), l=loadAt(h), chg=0, dis=0;
-      if(cfg.batt){
+      if(cap>0){
         if(s.ac>l){
-          chg=Math.min(s.ac-l, PMAX, (CAP-soc)/(DT*ETA));
+          chg=Math.min(s.ac-l, pmax, (cap-soc)/(DT*ETA));
           soc+=chg*DT*ETA;
         } else {
-          var avail=Math.max(0, soc-CAP*RESERVE);
-          dis=Math.min(l-s.ac, PMAX, (avail*ETA)/DT);
+          var avail=Math.max(0, soc-cap*RESERVE);
+          dis=Math.min(l-s.ac, pmax, (avail*ETA)/DT);
           soc-=(dis*DT)/ETA;
         }
       }
@@ -442,7 +458,7 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
       d.solar.push(s.ac); d.load.push(l);
       d.chg.push(chg); d.dis.push(dis);
       d.grid.push(l-s.ac-dis+chg);
-      d.soc.push(cfg.batt?soc:0);
+      d.soc.push(cap>0?soc:0);
     }
     var t={prod:0,use:0,exp:0,imp:0};
     for(var j=0;j<STEPS;j++){
@@ -612,12 +628,13 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
     $('meterNote').textContent = exporting?('exporting '+kw(-s.grid)+' kW')
                     : importing?('importing '+kw(s.grid)+' kW') : 'balanced';
 
-    var socPct=cfg.batt?(s.soc/CAP):0;
-    $('socVal').textContent=cfg.batt?Math.round(socPct*100)+'%':'off';
+    var socPct=cfg.cap>0?(s.soc/cfg.cap):0;
+    $('socVal').textContent=cfg.cap>0?Math.round(socPct*100)+'%':'off';
     $('socFill').setAttribute('height',(42*socPct).toFixed(1));
     $('socFill').setAttribute('y',(264-42*socPct).toFixed(1));
-    $('battNote').textContent=!cfg.batt?'not installed':
-      (s.chg>0.02?'13.5 kWh · charging':(s.dis>0.02?'13.5 kWh · discharging':'13.5 kWh · idle'));
+    var capLbl=cfg.cap.toFixed(1)+' kWh · ';
+    $('battNote').textContent=cfg.cap<=0?'not installed':
+      (s.chg>0.02?capLbl+'charging':(s.dis>0.02?capLbl+'discharging':capLbl+'idle'));
 
     // tiles
     $('tSolar').textContent=kw(s.solar);
@@ -626,8 +643,8 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
     $('tGridN').innerHTML = exporting?'<span class="chip out">export</span>'
                     : importing?'<span class="chip in">import</span>'
                     : '<span class="chip flat">balanced</span>';
-    $('tBatt').textContent=cfg.batt?Math.round(socPct*100)+'%':'—';
-    $('tBattN').textContent=!cfg.batt?'no storage':
+    $('tBatt').textContent=cfg.cap>0?Math.round(socPct*100)+'%':'—';
+    $('tBattN').textContent=cfg.cap<=0?'no storage':
       (s.chg>0.02?'charging at '+kw(s.chg)+' kW':(s.dis>0.02?'covering '+kw(s.dis)+' kW':'holding'));
 
     // chart cursor
@@ -640,7 +657,64 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
     return s;
   }
 
-  function rebuild(){ day=simulate(); renderChart(); renderTotals(); paint(); }
+  /* ---------- saving vs. battery size ---------- */
+  var sizeChart=document.getElementById('sizeChart');
+  var SM={l:52,r:20,t:22,b:50}, SW=700, SH=206;
+
+  function renderSize(){
+    var caps=[], saves=[], base=null, i;
+    for(i=0;i<=CAP_MAX*2;i++){
+      var c=i/2, cost=simulate(c).tot.cost;
+      if(base===null) base=cost;
+      caps.push(c); saves.push(base-cost);
+    }
+    var hi=0, lo=0;
+    for(i=0;i<saves.length;i++){ hi=Math.max(hi,saves[i]); lo=Math.min(lo,saves[i]); }
+    hi=Math.max(hi,0.2)*1.15; lo=Math.min(lo,0)*1.15;
+    var sx=function(c){ return SM.l+(c/CAP_MAX)*(SW-SM.l-SM.r); };
+    var sy=function(v){ return SH-SM.b-((v-lo)/(hi-lo))*(SH-SM.t-SM.b); };
+
+    var s='', d='', area='';
+    for(i=0;i<caps.length;i++){
+      d+=(i?'L':'M')+sx(caps[i]).toFixed(1)+' '+sy(saves[i]).toFixed(1)+' ';
+    }
+    area=d+'L'+sx(CAP_MAX).toFixed(1)+' '+sy(0).toFixed(1)+' L'+sx(0).toFixed(1)+' '+sy(0).toFixed(1)+' Z';
+    // y ticks at 0 and the peak
+    [0, hi/1.15].forEach(function(v){
+      s+='<line x1="'+SM.l+'" y1="'+sy(v)+'" x2="'+(SW-SM.r)+'" y2="'+sy(v)+'" stroke="var(--hair)" stroke-width="1"/>';
+      s+='<text class="sub" x="'+(SM.l-8)+'" y="'+(sy(v)+3.5)+'" text-anchor="end">$'+v.toFixed(2)+'</text>';
+    });
+    s+='<path d="'+area+'" fill="var(--batt)" opacity="0.14"/>';
+    s+='<path d="'+d+'" fill="none" stroke="var(--batt)" stroke-width="2.2" stroke-linejoin="round"/>';
+    // the point you are on
+    var cur=Math.round(cfg.cap*2), cx=sx(cfg.cap), cy=sy(saves[cur]);
+    s+='<line x1="'+cx.toFixed(1)+'" y1="'+SM.t+'" x2="'+cx.toFixed(1)+'" y2="'+sy(0).toFixed(1)+'" stroke="var(--ink)" stroke-width="1" stroke-dasharray="3 3"/>';
+    s+='<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="4.5" fill="var(--batt)"/>';
+    [0,5,10,15,20].forEach(function(c){
+      s+='<text class="sub" x="'+sx(c)+'" y="'+(SH-SM.b+16)+'" text-anchor="middle">'+c+'</text>';
+    });
+    s+='<text class="sub" x="'+((SM.l+SW-SM.r)/2)+'" y="'+(SH-10)+'" text-anchor="middle">battery capacity (kWh)</text>';
+    s+='<text class="sub" x="'+(SM.l-8)+'" y="'+(SM.t-8)+'" text-anchor="end">$/day</text>';
+    sizeChart.innerHTML=s;
+
+    var here=saves[cur], next=saves[Math.min(saves.length-1, cur+10)], step=next-here;
+    var note;
+    if(cfg.cap<=0){
+      note='No storage: every surplus kilowatt-hour leaves at the export rate and every evening kilowatt-hour comes back at retail. Drag the slider and watch the first few kilowatt-hours do most of the work.';
+    } else {
+      var lead='At '+cfg.cap.toFixed(1)+' kWh this day saves $'+here.toFixed(2)+'. Five kWh more ';
+      if(step>0.05){
+        note=lead+'adds $'+step.toFixed(2)+' a day — still climbing, because there is evening load left that the grid is covering.';
+      } else if(step<-0.05){
+        note=lead+'costs $'+Math.abs(step).toFixed(2)+' a day — past the knee, extra capacity mostly buys back kilowatt-hours you would have sold, and loses the round trip on the way.';
+      } else {
+        note=lead+'changes almost nothing: the evening load is already covered, so the extra capacity sits idle.';
+      }
+    }
+    $('sizeNote').textContent=note;
+  }
+
+  function rebuild(){ day=simulate(cfg.cap); renderChart(); renderTotals(); renderSize(); paint(); }
 
   /* ---------- controls ---------- */
   $('time').addEventListener('input',function(){ idx=+this.value; paint(); });
@@ -661,7 +735,12 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
       rebuild();
     });
   });
-  [['ac','ac'],['ev','ev'],['bt','batt']].forEach(function(p){
+  $('cap').addEventListener('input',function(){
+    cfg.cap=+this.value;
+    $('capOut').textContent=cfg.cap>0?cfg.cap.toFixed(1)+' kWh':'none';
+    rebuild();
+  });
+  [['ac','ac'],['ev','ev']].forEach(function(p){
     $(p[0]).addEventListener('click',function(){
       cfg[p[1]]=!cfg[p[1]];
       this.setAttribute('aria-pressed',cfg[p[1]]?'true':'false');
@@ -683,6 +762,7 @@ footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
   }
 
   $('kwOut').textContent=cfg.kw.toFixed(1)+' kW';
+  $('capOut').textContent=cfg.cap.toFixed(1)+' kWh';
   rebuild();
   requestAnimationFrame(frame);
 })();
