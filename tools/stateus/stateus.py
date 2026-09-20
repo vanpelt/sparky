@@ -424,7 +424,24 @@ def source_photo_tz(db_path: Path, year: int) -> dict:
     return out
 
 
-def source_git_tz(roots, year: int, emails=("vanpelt",)) -> dict:
+def _git_identities() -> tuple:
+    """Whose commits count as the user's, from local git config."""
+    import subprocess
+
+    out = []
+    for key in ("user.email", "user.name"):
+        try:
+            r = subprocess.run(["git", "config", "--get", key],
+                               capture_output=True, text=True, timeout=5)
+        except (subprocess.SubprocessError, OSError):
+            continue
+        v = r.stdout.strip()
+        if v:
+            out.append(v.split("@")[0].lower() if key == "user.email" else v.lower())
+    return tuple(dict.fromkeys(out))
+
+
+def source_git_tz(roots, year: int, emails=()) -> dict:
     """Timezone offsets from the user's own git commits.
 
     A developer commits from wherever they are, and git records the committer's
@@ -433,6 +450,10 @@ def source_git_tz(roots, year: int, emails=("vanpelt",)) -> dict:
     those identities are dropped.
     """
     import subprocess
+
+    emails = tuple(e.lower() for e in emails) or _git_identities()
+    if not emails:
+        return {}  # nothing identifies the user's own commits; don't guess
 
     out = {}
     for root in roots:
@@ -660,6 +681,8 @@ def main():
     p.add_argument("--no-photos", action="store_true")
     p.add_argument("--no-tz", action="store_true",
                    help="Skip timezone corroboration from screenshots and git commits")
+    p.add_argument("--author", action="append", default=[],
+                   help="Substring identifying your commits (default: git config user.email)")
     p.add_argument("--git", type=Path, action="append",
                    default=[Path.home() / "Development"],
                    help="Directory of git repos to read commit timezones from")
@@ -699,7 +722,7 @@ def main():
     if not args.no_tz:
         for d, v in source_photo_tz(args.photos, args.year).items():
             tz_by_day.setdefault(d, set()).update(v)
-        for d, v in source_git_tz(args.git, args.year).items():
+        for d, v in source_git_tz(args.git, args.year, tuple(args.author)).items():
             tz_by_day.setdefault(d, set()).update(v)
         print(f"  timezone  {len(tz_by_day):>6} days with a clock reading")
 
