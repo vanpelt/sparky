@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="description" content="An interactive look at how a grid-tied residential solar system actually works: production, loads, the battery, and the bidirectional meter, hour by hour.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Backfeed — Rooftop to Grid">
+<meta property="og:description" content="An interactive look at how a grid-tied residential solar system actually works, hour by hour.">
+<title>Rooftop to Grid</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+h1,h2,h3,p{margin:0}
+:root{
+  --bg:#E6EBEF;
+  --surface:#FBFCFD;
+  --sunken:#EEF2F5;
+  --ink:#131C26;
+  --muted:#5B6B7A;
+  --line:#C7D2DB;
+  --hair:#DDE4EA;
+  --solar:#C8761A;
+  --import:#AE4437;
+  --export:#20775A;
+  --batt:#59499F;
+  --home:#3B4C5C;
+  --focus:#1D6FB8;
+  --shadow:0 1px 2px rgba(19,28,38,.07), 0 8px 24px -16px rgba(19,28,38,.25);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0E1620;
+    --surface:#17212C;
+    --sunken:#121B24;
+    --ink:#E4EDF4;
+    --muted:#93A5B4;
+    --line:#2B3A48;
+    --hair:#22303C;
+    --solar:#EFA73F;
+    --import:#E8796A;
+    --export:#4ECB9B;
+    --batt:#9C90EE;
+    --home:#9FB4C6;
+    --focus:#69B6F2;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0E1620;
+  --surface:#17212C;
+  --sunken:#121B24;
+  --ink:#E4EDF4;
+  --muted:#93A5B4;
+  --line:#2B3A48;
+  --hair:#22303C;
+  --solar:#EFA73F;
+  --import:#E8796A;
+  --export:#4ECB9B;
+  --batt:#9C90EE;
+  --home:#9FB4C6;
+  --focus:#69B6F2;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.8);
+}
+
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:"IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size:15px;
+  line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1060px;margin:0 auto;padding-inline:16px;padding-block:34px 56px;display:flex;flex-direction:column;gap:26px}
+
+h1,h2,h3{font-family:Archivo, ui-sans-serif, system-ui, sans-serif;text-wrap:balance;line-height:1.15}
+h1{font-size:clamp(30px,5.2vw,44px);font-weight:700;letter-spacing:-.02em}
+h2{font-size:17px;font-weight:600;letter-spacing:-.01em}
+p{max-width:64ch}
+.eyebrow{
+  font-family:"IBM Plex Mono", ui-monospace, monospace;
+  font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);
+}
+.lede{color:var(--muted);font-size:16.5px;margin-top:10px}
+header .eyebrow{margin-bottom:12px}
+
+.card{
+  background:var(--surface);
+  border:1px solid var(--line);
+  border-radius:10px;
+  box-shadow:var(--shadow);
+}
+
+/* ---- stage ---- */
+.stage{overflow:hidden}
+.stage-top{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:12px 16px;border-bottom:1px solid var(--hair);
+}
+.clock{
+  font-family:"IBM Plex Mono", ui-monospace, monospace;
+  font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;min-width:104px;
+}
+.scrub{flex:1 1 220px;min-width:160px;display:flex;align-items:center;gap:10px}
+input[type=range]{
+  flex:1;-webkit-appearance:none;appearance:none;background:transparent;height:24px;cursor:pointer;
+}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--line)}
+input[type=range]::-moz-range-track{height:4px;border-radius:2px;background:var(--line)}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--ink);
+  border:3px solid var(--surface);margin-top:-6px;box-shadow:0 0 0 1px var(--line)
+}
+input[type=range]::-moz-range-thumb{
+  width:16px;height:16px;border-radius:50%;background:var(--ink);border:3px solid var(--surface);box-shadow:0 0 0 1px var(--line)
+}
+button{
+  font:inherit;color:inherit;background:var(--sunken);border:1px solid var(--line);
+  border-radius:7px;padding:6px 12px;cursor:pointer;transition:background .15s, border-color .15s;
+}
+button:hover{border-color:var(--muted)}
+button[aria-pressed="true"]{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+.diagram{padding:6px 0 0;overflow-x:auto}
+.diagram svg{display:block;width:100%;min-width:640px;height:auto;max-width:100%}
+.diagram svg.pinned{min-width:640px}
+svg text{font-family:"IBM Plex Sans", sans-serif;fill:var(--ink)}
+svg .lbl{font-size:11.5px;font-weight:500}
+svg .sub{font-size:10px;fill:var(--muted);font-family:"IBM Plex Mono",monospace;letter-spacing:.02em}
+svg .val{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums}
+svg .box{fill:var(--sunken);stroke:var(--line);stroke-width:1.2}
+svg .wire{fill:none;stroke:var(--line);stroke-width:2.4;stroke-linecap:round}
+svg .stroke{stroke:var(--home);fill:none;stroke-width:1.6;stroke-linejoin:round}
+
+.tiles{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--hair)}
+.tile{padding:12px 16px 14px;border-left:1px solid var(--hair)}
+.tile:first-child{border-left:0}
+.tile .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.tile .v{font-family:"IBM Plex Mono",monospace;font-size:24px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.25;margin-top:3px}
+.tile .n{font-size:12px;color:var(--muted)}
+.tile.solar .v{color:var(--solar)}
+.tile.batt .v{color:var(--batt)}
+.chip{
+  display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;
+  letter-spacing:.07em;text-transform:uppercase;padding:1px 6px;border-radius:3px;border:1px solid currentColor;
+}
+.chip.in{color:var(--import)}
+.chip.out{color:var(--export)}
+.chip.flat{color:var(--muted)}
+
+/* ---- controls ---- */
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:18px 26px;padding:16px}
+.ctl{display:flex;flex-direction:column;gap:7px}
+.ctl > .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.seg{display:flex;gap:6px;flex-wrap:wrap}
+.seg button{padding:5px 10px;font-size:13px}
+.sizeRow{display:flex;align-items:center;gap:10px}
+.sizeRow output{font-family:"IBM Plex Mono",monospace;font-weight:600;font-variant-numeric:tabular-nums;min-width:66px}
+
+/* ---- chart ---- */
+.chartCard{padding:16px}
+.chartHead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.swatch{width:11px;height:11px;border-radius:2px;display:inline-block}
+.chartWrap{overflow-x:auto}
+.chartWrap svg{display:block;width:100%;min-width:560px;height:auto}
+
+.totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--hair);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.total{background:var(--surface);padding:12px 15px}
+.total .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.total .v{font-family:"IBM Plex Mono",monospace;font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:2px}
+
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:22px 30px}
+.note{border-top:2px solid var(--ink);padding-top:11px}
+.note h3{font-size:14.5px;font-weight:600;margin-bottom:5px}
+.note p{font-size:13.5px;color:var(--muted);margin:0}
+.note b{color:var(--ink);font-weight:600}
+footer{border-top:1px solid var(--hair);padding-top:14px;font-size:12.5px;color:var(--muted)}
+footer code{font-family:"IBM Plex Mono",monospace;font-size:12px}
+
+@media (max-width:640px){
+  .tiles{grid-template-columns:repeat(2,1fr)}
+  .tile:nth-child(3){border-left:0}
+  .tile:nth-child(n+3){border-top:1px solid var(--hair)}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001s !important;transition-duration:.001s !important}
+}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Rooftop PV &middot; 240&thinsp;V service &middot; net billing</div>
+    <h1>Your roof makes power. The grid decides what happens next.</h1>
+    <p class="lede">A house with panels is not off the grid — it is a small generator wired into it. Move through the day and watch where every kilowatt actually goes.</p>
+  </header>
+
+  <section class="card stage">
+    <div class="stage-top">
+      <div class="clock" id="clock">1:15 PM</div>
+      <button id="play" aria-pressed="false">▶ Play day</button>
+      <label class="scrub"><span class="eyebrow">Time</span>
+        <input type="range" id="time" min="0" max="95" step="1" value="53" aria-label="Time of day">
+      </label>
+    </div>
+
+    <div class="diagram">
+      <svg id="schem" viewBox="0 0 700 330" role="img" aria-label="Energy flow from the sun through panels, inverter, main panel, home, battery and the utility meter to the grid">
+        <!-- wires (drawn first, under the boxes) -->
+        <path id="w-solar" class="wire" d="M152 128 H 214"/>
+        <path id="w-inv"   class="wire" d="M306 130 H 368"/>
+        <path id="w-home"  class="wire" d="M446 118 C 494 118, 508 74, 556 66"/>
+        <path id="w-grid"  class="wire" d="M420 168 V 216 C 420 232, 432 240, 450 240 H 592"/>
+        <path id="w-batt"  class="wire" d="M382 168 V 200 C 382 224, 360 236, 330 240 H 300"/>
+
+        <!-- sun -->
+        <g id="sun">
+          <circle cx="74" cy="40" r="15" fill="var(--solar)"/>
+          <g id="rays" stroke="var(--solar)" stroke-width="2.2" stroke-linecap="round">
+            <path d="M74 12 V 2"/><path d="M74 78 V 68"/>
+            <path d="M46 40 H 36"/><path d="M112 40 H 102"/>
+            <path d="M94 20 L 101 13"/><path d="M54 60 L 47 67"/>
+            <path d="M94 60 L 101 67"/><path d="M54 20 L 47 13"/>
+          </g>
+          <text class="sub" x="122" y="36" id="irrLabel">1000 W/m²</text>
+          <text class="sub" x="122" y="50">plane of array</text>
+        </g>
+
+        <!-- pv array -->
+        <g>
+          <polygon points="36,152 66,96 152,96 122,152" fill="var(--sunken)" stroke="var(--line)" stroke-width="1.2"/>
+          <path d="M65.5 96 L 35.5 152 M 94 96 L 64 152 M 123 96 L 93 152" stroke="var(--line)" stroke-width="1"/>
+          <path id="arrayGlow" d="M36 152 L 66 96 L 152 96 L 122 152 Z" fill="var(--solar)" opacity="0.55"/>
+          <text class="lbl" x="36" y="172">PV array</text>
+          <text class="sub" x="36" y="186" id="arrSpec">20 × 400 W modules</text>
+          <text class="val" x="36" y="204" id="arrVal" fill="var(--solar)">5.90 kW DC</text>
+        </g>
+
+        <!-- inverter -->
+        <g>
+          <rect class="box" x="214" y="98" width="92" height="64" rx="6"/>
+          <path class="stroke" d="M232 140 h 12 v -18 h 12" stroke-width="1.8"/>
+          <path class="stroke" d="M262 131 c 5 -14, 12 14, 17 0" stroke-width="1.8"/>
+          <text class="sub" x="228" y="116">DC → AC</text>
+          <text class="lbl" x="214" y="180">Inverter</text>
+          <text class="val" x="214" y="197" id="invVal">5.00 kW AC</text>
+          <text class="sub" x="214" y="211" id="clipNote"></text>
+        </g>
+
+        <!-- main panel -->
+        <g>
+          <rect class="box" x="368" y="98" width="78" height="70" rx="5"/>
+          <path d="M380 114 h 22 M380 126 h 22 M380 138 h 22 M380 150 h 22" stroke="var(--line)" stroke-width="3" stroke-linecap="round"/>
+          <path d="M412 114 h 22 M412 126 h 22 M412 138 h 22 M412 150 h 22" stroke="var(--line)" stroke-width="3" stroke-linecap="round"/>
+          <text class="lbl" x="362" y="88">Main panel</text>
+        </g>
+
+        <!-- house -->
+        <g>
+          <path class="stroke" d="M556 66 h 8 M566 92 V 52 L 616 22 L 666 52 V 92 Z" stroke-width="1.8"/>
+          <rect x="600" y="68" width="18" height="24" fill="none" stroke="var(--home)" stroke-width="1.5"/>
+          <text class="lbl" x="556" y="112">Home loads</text>
+          <text class="val" x="556" y="130" id="homeVal">2.10 kW</text>
+          <text class="sub" x="556" y="144" id="homeNote">fridge, lights, plugs</text>
+        </g>
+
+        <!-- meter + grid -->
+        <g>
+          <circle cx="612" cy="240" r="21" class="box"/>
+          <text class="val" x="612" y="238" text-anchor="middle" id="meterDir" font-size="10">OUT</text>
+          <text class="sub" x="612" y="250" text-anchor="middle">kWh</text>
+          <path id="meterArrow" d="M596 264 H 628" stroke="var(--export)" stroke-width="2" marker-end="url(#mk)"/>
+          <text class="lbl" x="576" y="292">Bidirectional meter</text>
+          <text class="sub" x="576" y="306" id="meterNote">exporting 3.8 kW</text>
+          <!-- pole -->
+          <path d="M660 214 V 120 M 640 140 H 684 M 646 158 H 678" stroke="var(--line)" stroke-width="2.6" stroke-linecap="round"/>
+          <path d="M684 140 C 694 146, 698 150, 700 152 M 678 158 C 688 162, 695 165, 700 167" stroke="var(--line)" stroke-width="1.6" fill="none"/>
+          <text class="lbl" x="668" y="112" text-anchor="middle">Utility grid</text>
+        </g>
+
+        <!-- battery -->
+        <g>
+          <rect class="box" x="204" y="214" width="96" height="54" rx="6"/>
+          <rect id="socFill" x="208" y="222" width="88" height="42" fill="var(--batt)" opacity="0.28"/>
+          <text class="val" x="252" y="246" text-anchor="middle" id="socVal" fill="var(--batt)">62%</text>
+          <text class="lbl" x="204" y="286">Battery</text>
+          <text class="sub" x="204" y="300" id="battNote">13.5 kWh · charging</text>
+        </g>
+
+        <defs>
+          <marker id="mk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+            <path d="M0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+          </marker>
+        </defs>
+        <g id="dots"></g>
+      </svg>
+    </div>
+
+    <div class="tiles">
+      <div class="tile solar"><div class="k">Solar</div><div class="v" id="tSolar">5.00</div><div class="n">kW AC off the roof</div></div>
+      <div class="tile"><div class="k">Home</div><div class="v" id="tHome">2.10</div><div class="n">kW being used</div></div>
+      <div class="tile"><div class="k">Grid</div><div class="v" id="tGrid">3.80</div><div class="n" id="tGridN"><span class="chip out">export</span></div></div>
+      <div class="tile batt"><div class="k">Battery</div><div class="v" id="tBatt">62%</div><div class="n" id="tBattN">charging at 1.2 kW</div></div>
+    </div>
+  </section>
+
+  <section class="card controls">
+    <div class="ctl">
+      <span class="k">Array size</span>
+      <div class="sizeRow">
+        <input type="range" id="kw" min="3" max="14" step="0.4" value="8" aria-label="Array size in kilowatts DC">
+        <output id="kwOut">8.0 kW</output>
+      </div>
+    </div>
+    <div class="ctl">
+      <span class="k">Sky</span>
+      <div class="seg" id="sky" role="group" aria-label="Sky condition">
+        <button data-v="clear" aria-pressed="true">Clear</button>
+        <button data-v="partly" aria-pressed="false">Passing clouds</button>
+        <button data-v="overcast" aria-pressed="false">Overcast</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <span class="k">In the house</span>
+      <div class="seg">
+        <button id="ac" aria-pressed="false">A/C running</button>
+        <button id="ev" aria-pressed="false">EV charging</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <span class="k">Storage</span>
+      <div class="seg">
+        <button id="bt" aria-pressed="true">13.5 kWh battery</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card chartCard">
+    <div class="chartHead">
+      <h2>One day, hour by hour</h2>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--solar)"></i>Production</span>
+        <span><i class="swatch" style="background:var(--home)"></i>Consumption</span>
+        <span><i class="swatch" style="background:var(--export)"></i>Exported</span>
+        <span><i class="swatch" style="background:var(--import)"></i>Imported</span>
+        <span><i class="swatch" style="background:var(--batt)"></i>Battery</span>
+      </div>
+    </div>
+    <div class="chartWrap">
+      <svg id="chart" viewBox="0 0 700 250" role="img" aria-label="Production and consumption over 24 hours, with imported and exported energy shaded"></svg>
+    </div>
+  </section>
+
+  <section class="totals" id="totals"></section>
+
+  <section class="notes">
+    <div class="note">
+      <h3>The inverter is the translator</h3>
+      <p>Modules make DC at whatever voltage the string happens to sit at. The inverter turns it into <b>240 V, 60 Hz AC</b> locked to the grid's own phase — it follows the utility's waveform rather than setting its own. Oversize the array against the inverter and the midday peak gets <b>clipped</b> flat; that is usually a deliberate trade, not a fault.</p>
+    </div>
+    <div class="note">
+      <h3>The meter runs both ways</h3>
+      <p>Solar power takes the shortest path: it feeds your loads first, at the panel, before anything reaches the meter. Only the leftover <b>backfeeds</b> through a bidirectional meter into the utility's transformer, where your neighbors consume it. The meter counts each direction in its own register.</p>
+    </div>
+    <div class="note">
+      <h3>Exported kWh are worth less than the ones you keep</h3>
+      <p>Under older <b>net metering</b>, an exported kWh cancelled an imported one, 1:1. Newer net-billing rules (California's NEM 3.0, for instance) pay an avoided-cost rate that can be a fraction of retail — so the value of the system shifts toward <b>self-consumption</b>, which is what the battery buys you.</p>
+    </div>
+    <div class="note">
+      <h3>In a blackout, the panels shut down too</h3>
+      <p>A grid-tied inverter must stop within milliseconds when the line goes dead — <b>anti-islanding</b>, required by UL 1741 and IEEE 1547 — so it can't energize a line a crew believes is de-energized. Backup power needs a battery plus an automatic transfer switch that islands the house first.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Model, not a quote. Clear-sky irradiance for a south-facing array near 37°N in June, <code>0.84</code> system derate, <code>1.15</code> DC/AC ratio, 5 kW battery limits with a 20% reserve, and example rates of <code>$0.31/kWh</code> imported against a <code>$0.08/kWh</code> export credit. Your site, tariff and load shape will differ.</p>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var STEPS=96, DT=24/STEPS;
+  var CAP=13.5, PMAX=5, RESERVE=0.20, ETA=0.94;
+  var RATE_IN=0.31, RATE_OUT=0.08;
+  var cfg={kw:8, sky:'clear', ac:false, ev:false, batt:true};
+  var day=null, idx=53, playing=false;
+
+  function bump(h,c,w){var d=h-c;return Math.exp(-(d*d)/(2*w*w));}
+
+  function cloud(h){
+    if(cfg.sky==='clear') return 1;
+    var wob=0.5+0.5*Math.sin(h*2.9)*Math.cos(h*1.7);
+    if(cfg.sky==='partly') return 0.42+0.58*wob;
+    return 0.16+0.12*wob;
+  }
+  // clear-sky plane-of-array irradiance, W/m^2
+  function irradiance(h){
+    var rise=6.1, set=19.7;
+    if(h<=rise||h>=set) return 0;
+    return 1010*Math.pow(Math.sin(Math.PI*(h-rise)/(set-rise)),1.18)*cloud(h);
+  }
+  function solarAt(h){
+    var dc=cfg.kw*(irradiance(h)/1000)*0.84;
+    var lim=cfg.kw/1.15;
+    return {dc:dc, ac:Math.min(dc,lim), clip:dc>lim+0.01, lim:lim};
+  }
+  function loadAt(h){
+    var p=0.34;                        // always-on: fridge, network, standby
+    p+=0.95*bump(h,7.1,1.05);          // morning
+    p+=0.30*bump(h,12.6,2.1);          // midday
+    p+=1.55*bump(h,18.9,1.75);         // evening peak: cooking, lights, TV
+    if(cfg.ac) p+=2.15*bump(h,16.2,3.1);
+    if(cfg.ev){                        // level 2 charger, 10pm-1am
+      var t=(h>=22)?h-22:(h<1.6?h+2:-9);
+      if(t>=0&&t<3.6) p+=7.2*Math.min(1,t*6)*Math.min(1,(3.6-t)*6);
+    }
+    return p;
+  }
+
+  function simulate(){
+    var d={solar:[],dcs:[],load:[],chg:[],dis:[],grid:[],soc:[],clip:[],irr:[]};
+    var soc=CAP*0.26;
+    for(var i=0;i<STEPS;i++){
+      var h=i*DT, s=solarAt(h), l=loadAt(h), chg=0, dis=0;
+      if(cfg.batt){
+        if(s.ac>l){
+          chg=Math.min(s.ac-l, PMAX, (CAP-soc)/(DT*ETA));
+          soc+=chg*DT*ETA;
+        } else {
+          var avail=Math.max(0, soc-CAP*RESERVE);
+          dis=Math.min(l-s.ac, PMAX, (avail*ETA)/DT);
+          soc-=(dis*DT)/ETA;
+        }
+      }
+      d.irr.push(irradiance(h));
+      d.dcs.push(s.dc); d.clip.push(s.clip);
+      d.solar.push(s.ac); d.load.push(l);
+      d.chg.push(chg); d.dis.push(dis);
+      d.grid.push(l-s.ac-dis+chg);
+      d.soc.push(cfg.batt?soc:0);
+    }
+    var t={prod:0,use:0,exp:0,imp:0};
+    for(var j=0;j<STEPS;j++){
+      t.prod+=d.solar[j]*DT; t.use+=d.load[j]*DT;
+      if(d.grid[j]>0) t.imp+=d.grid[j]*DT; else t.exp+=-d.grid[j]*DT;
+    }
+    t.self=t.use>0?Math.max(0,Math.min(1,(t.use-t.imp)/t.use)):0;
+    t.cost=t.imp*RATE_IN-t.exp*RATE_OUT;
+    d.tot=t;
+    return d;
+  }
+
+  /* ---------- formatting ---------- */
+  function kw(v){return (Math.abs(v)<10?v.toFixed(2):v.toFixed(1));}
+  function clock(i){
+    var h=Math.floor(i*DT), m=Math.round((i*DT-h)*60);
+    var ap=h<12?'AM':'PM', hh=h%12; if(hh===0)hh=12;
+    return hh+':'+(m<10?'0':'')+m+' '+ap;
+  }
+
+  /* ---------- flow dots ---------- */
+  var DOTS=[
+    {path:'w-solar', n:6, col:function(){return 'var(--solar)';}, mag:function(s){return s.solar;}, rev:function(){return false;}},
+    {path:'w-inv',   n:6, col:function(){return 'var(--solar)';}, mag:function(s){return s.solar;}, rev:function(){return false;}},
+    {path:'w-home',  n:6, col:function(){return 'var(--home)';},  mag:function(s){return s.load;},  rev:function(){return false;}},
+    {path:'w-grid',  n:7, col:function(s){return s.grid>0?'var(--import)':'var(--export)';}, mag:function(s){return Math.abs(s.grid);}, rev:function(s){return s.grid>0;}},
+    {path:'w-batt',  n:5, col:function(){return 'var(--batt)';},  mag:function(s){return s.chg+s.dis;}, rev:function(s){return s.dis>0.01;}}
+  ];
+  var dotG=document.getElementById('dots'), reduce=false;
+  try{reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(e){}
+  DOTS.forEach(function(f){
+    f.el=document.getElementById(f.path);
+    f.len=f.el.getTotalLength();
+    f.off=[];
+    f.nodes=[];
+    for(var i=0;i<f.n;i++){
+      var c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+      c.setAttribute('r','3.4');
+      dotG.appendChild(c);
+      f.nodes.push(c);
+      f.off.push(i/f.n);
+    }
+  });
+
+  function drawDots(st,dt){
+    DOTS.forEach(function(f){
+      var m=f.mag(st), on=m>0.06, rev=f.rev(st), col=f.col(st);
+      var v=Math.min(0.42, 0.05+m*0.035);
+      for(var i=0;i<f.n;i++){
+        var c=f.nodes[i];
+        if(!on){c.setAttribute('opacity','0');continue;}
+        if(!reduce){
+          f.off[i]+= (rev?-1:1)*v*dt;
+          if(f.off[i]>1) f.off[i]-=1;
+          if(f.off[i]<0) f.off[i]+=1;
+        }
+        var p=f.el.getPointAtLength(f.off[i]*f.len);
+        c.setAttribute('cx',p.x.toFixed(1));
+        c.setAttribute('cy',p.y.toFixed(1));
+        c.setAttribute('fill',col);
+        c.setAttribute('opacity','0.95');
+      }
+    });
+  }
+
+  /* ---------- chart ---------- */
+  var chart=document.getElementById('chart');
+  var M={l:44,r:16,t:30,b:32}, CW=700, CH=250;
+  var px=function(h){return M.l+(h/24)*(CW-M.l-M.r);};
+  var maxY=6;
+  function py(v){return CH-M.b-(v/maxY)*(CH-M.t-M.b);}
+
+  function renderChart(){
+    var m=1;
+    for(var i=0;i<STEPS;i++) m=Math.max(m,day.solar[i],day.load[i]);
+    maxY=Math.ceil(m*1.12);
+    var s='', step=(CW-M.l-M.r)/STEPS;
+    // gridlines
+    var tick=maxY>8?2:1;
+    for(var y=0;y<=maxY;y+=tick){
+      s+='<line x1="'+M.l+'" y1="'+py(y)+'" x2="'+(CW-M.r)+'" y2="'+py(y)+'" stroke="var(--hair)" stroke-width="1"/>';
+      s+='<text class="sub" x="'+(M.l-8)+'" y="'+(py(y)+3.5)+'" text-anchor="end">'+y+'</text>';
+    }
+    s+='<text class="sub" x="'+(M.l-8)+'" y="'+(M.t-12)+'" text-anchor="end">kW</text>';
+    // bands: accumulate one path per colour so overlapping edges can't stripe the fill
+    var bImp='', bExp='', bChg='', bDis='';
+    function seg(x0,x1,yTop,yBot){
+      return 'M'+x0.toFixed(2)+' '+yTop.toFixed(2)+'H'+x1.toFixed(2)+'V'+yBot.toFixed(2)+'H'+x0.toFixed(2)+'Z';
+    }
+    for(var i2=0;i2<STEPS;i2++){
+      var x0=px(i2*DT), x1=px((i2+1)*DT), so=day.solar[i2], lo=day.load[i2];
+      if(lo>so+0.004){
+        var d1=day.dis[i2];
+        if(d1>0.004) bDis+=seg(x0,x1,py(so+d1),py(so));
+        bImp+=seg(x0,x1,py(lo),py(so+d1));
+      } else if(so>lo+0.004){
+        var c1=day.chg[i2];
+        if(c1>0.004) bChg+=seg(x0,x1,py(lo+c1),py(lo));
+        bExp+=seg(x0,x1,py(so),py(lo+c1));
+      }
+    }
+    if(bExp) s+='<path d="'+bExp+'" fill="var(--export)" opacity="0.24"/>';
+    if(bImp) s+='<path d="'+bImp+'" fill="var(--import)" opacity="0.26"/>';
+    if(bChg) s+='<path d="'+bChg+'" fill="var(--batt)" opacity="0.30"/>';
+    if(bDis) s+='<path d="'+bDis+'" fill="var(--batt)" opacity="0.30"/>';
+    // curves
+    function line(arr){
+      var p='';
+      for(var i=0;i<STEPS;i++) p+=(i?'L':'M')+px(i*DT).toFixed(1)+' '+py(arr[i]).toFixed(1)+' ';
+      return p;
+    }
+    s+='<path d="'+line(day.load)+'" fill="none" stroke="var(--home)" stroke-width="1.8" stroke-linejoin="round"/>';
+    s+='<path d="'+line(day.solar)+'" fill="none" stroke="var(--solar)" stroke-width="2.4" stroke-linejoin="round"/>';
+    // axis
+    s+='<line x1="'+M.l+'" y1="'+py(0)+'" x2="'+(CW-M.r)+'" y2="'+py(0)+'" stroke="var(--line)" stroke-width="1.2"/>';
+    [0,3,6,9,12,15,18,21,24].forEach(function(h){
+      var lab=h===0||h===24?'12a':(h===12?'12p':(h<12?h+'a':(h-12)+'p'));
+      s+='<text class="sub" x="'+px(h)+'" y="'+(CH-M.b+16)+'" text-anchor="middle">'+lab+'</text>';
+    });
+    s+='<g id="cursor"><line id="cline" x1="0" y1="'+M.t+'" x2="0" y2="'+py(0)+'" stroke="var(--ink)" stroke-width="1" stroke-dasharray="3 3"/>'+
+       '<circle id="cdotS" r="4" fill="var(--solar)"/><circle id="cdotL" r="4" fill="var(--home)"/></g>';
+    chart.innerHTML=s;
+  }
+
+  function renderTotals(){
+    var t=day.tot;
+    var rows=[
+      ['Produced', t.prod.toFixed(1)+' kWh', ''],
+      ['Used', t.use.toFixed(1)+' kWh', ''],
+      ['Exported', t.exp.toFixed(1)+' kWh', 'var(--export)'],
+      ['Imported', t.imp.toFixed(1)+' kWh', 'var(--import)'],
+      ['Self-powered', Math.round(t.self*100)+'%', ''],
+      [t.cost>=0?'Owed today':'Credit today', '$'+Math.abs(t.cost).toFixed(2), '']
+    ];
+    document.getElementById('totals').innerHTML=rows.map(function(r){
+      return '<div class="total"><div class="k">'+r[0]+'</div><div class="v"'+(r[2]?' style="color:'+r[2]+'"':'')+'>'+r[1]+'</div></div>';
+    }).join('');
+  }
+
+  /* ---------- per-frame readout ---------- */
+  var $=function(id){return document.getElementById(id);};
+  function state(){
+    return {solar:day.solar[idx], dc:day.dcs[idx], load:day.load[idx], grid:day.grid[idx],
+            chg:day.chg[idx], dis:day.dis[idx], soc:day.soc[idx], clip:day.clip[idx], irr:day.irr[idx]};
+  }
+  function paint(){
+    var s=state();
+    $('clock').textContent=clock(idx);
+    $('time').value=idx;
+
+    // diagram
+    $('arrayGlow').setAttribute('opacity', (0.06+0.5*Math.min(1,s.irr/950)).toFixed(2));
+    $('rays').setAttribute('opacity', (0.15+0.85*Math.min(1,s.irr/700)).toFixed(2));
+    $('irrLabel').textContent=Math.round(s.irr)+' W/m²';
+    $('arrVal').textContent=kw(s.dc)+' kW DC';
+    $('invVal').textContent=kw(s.solar)+' kW AC';
+    $('clipNote').textContent=s.clip?('clipping at '+ (cfg.kw/1.15).toFixed(1) +' kW'):'';
+    $('homeVal').textContent=kw(s.load)+' kW';
+    $('arrSpec').textContent=Math.round(cfg.kw*1000/400)+' × 400 W modules';
+
+    var exporting=s.grid<-0.02, importing=s.grid>0.02;
+    $('meterDir').textContent=exporting?'OUT':(importing?'IN':'—');
+    $('meterDir').setAttribute('fill', exporting?'var(--export)':(importing?'var(--import)':'var(--muted)'));
+    var arr=$('meterArrow');
+    arr.setAttribute('stroke', exporting?'var(--export)':(importing?'var(--import)':'var(--line)'));
+    arr.setAttribute('d', importing?'M628 264 H 596':'M596 264 H 628');
+    $('meterNote').textContent = exporting?('exporting '+kw(-s.grid)+' kW')
+                    : importing?('importing '+kw(s.grid)+' kW') : 'balanced';
+
+    var socPct=cfg.batt?(s.soc/CAP):0;
+    $('socVal').textContent=cfg.batt?Math.round(socPct*100)+'%':'off';
+    $('socFill').setAttribute('height',(42*socPct).toFixed(1));
+    $('socFill').setAttribute('y',(264-42*socPct).toFixed(1));
+    $('battNote').textContent=!cfg.batt?'not installed':
+      (s.chg>0.02?'13.5 kWh · charging':(s.dis>0.02?'13.5 kWh · discharging':'13.5 kWh · idle'));
+
+    // tiles
+    $('tSolar').textContent=kw(s.solar);
+    $('tHome').textContent=kw(s.load);
+    $('tGrid').textContent=kw(Math.abs(s.grid));
+    $('tGridN').innerHTML = exporting?'<span class="chip out">export</span>'
+                    : importing?'<span class="chip in">import</span>'
+                    : '<span class="chip flat">balanced</span>';
+    $('tBatt').textContent=cfg.batt?Math.round(socPct*100)+'%':'—';
+    $('tBattN').textContent=!cfg.batt?'no storage':
+      (s.chg>0.02?'charging at '+kw(s.chg)+' kW':(s.dis>0.02?'covering '+kw(s.dis)+' kW':'holding'));
+
+    // chart cursor
+    var x=px(idx*DT);
+    var cl=$('cline'); if(cl){
+      cl.setAttribute('x1',x); cl.setAttribute('x2',x);
+      $('cdotS').setAttribute('cx',x); $('cdotS').setAttribute('cy',py(s.solar));
+      $('cdotL').setAttribute('cx',x); $('cdotL').setAttribute('cy',py(s.load));
+    }
+    return s;
+  }
+
+  function rebuild(){ day=simulate(); renderChart(); renderTotals(); paint(); }
+
+  /* ---------- controls ---------- */
+  $('time').addEventListener('input',function(){ idx=+this.value; paint(); });
+  $('play').addEventListener('click',function(){
+    playing=!playing;
+    this.setAttribute('aria-pressed',playing?'true':'false');
+    this.textContent=playing?'❚❚ Pause':'▶ Play day';
+  });
+  $('kw').addEventListener('input',function(){
+    cfg.kw=+this.value; $('kwOut').textContent=cfg.kw.toFixed(1)+' kW'; rebuild();
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#sky button'),function(b){
+    b.addEventListener('click',function(){
+      cfg.sky=b.dataset.v;
+      Array.prototype.forEach.call(document.querySelectorAll('#sky button'),function(o){
+        o.setAttribute('aria-pressed', o===b?'true':'false');
+      });
+      rebuild();
+    });
+  });
+  [['ac','ac'],['ev','ev'],['bt','batt']].forEach(function(p){
+    $(p[0]).addEventListener('click',function(){
+      cfg[p[1]]=!cfg[p[1]];
+      this.setAttribute('aria-pressed',cfg[p[1]]?'true':'false');
+      rebuild();
+    });
+  });
+
+  /* ---------- loop ---------- */
+  var last=performance.now(), acc=0;
+  function frame(now){
+    var dt=Math.min(0.05,(now-last)/1000); last=now; 
+    if(playing){
+      acc+=dt;
+      while(acc>0.09){ acc-=0.09; idx=(idx+1)%STEPS; }
+      paint();
+    }
+    drawDots(state(),dt);
+    requestAnimationFrame(frame);
+  }
+
+  $('kwOut').textContent=cfg.kw.toFixed(1)+' kW';
+  rebuild();
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
