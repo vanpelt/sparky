@@ -1,0 +1,1866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Dial — How Broadcast Television Works, and What It's Worth Now</title>
+<meta name="description" content="An interactive guide to over-the-air television: the 6 MHz channel, the ATSC bitrate budget, the network-affiliate bargain, and twenty years of retransmission money — with the numbers as of September 2026.">
+
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="The Dial — How Broadcast Television Works, and What It's Worth Now">
+<meta property="og:description" content="The 6 MHz channel, the ATSC bitrate budget, the network-affiliate bargain, and twenty years of retransmission money. Interactive.">
+<meta property="og:image" content="https://vanpelt.github.io/sparky/tools/dial/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:url" content="https://vanpelt.github.io/sparky/tools/dial/">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Dial — How Broadcast Television Works, and What It's Worth Now">
+<meta name="twitter:description" content="The 6 MHz channel, the ATSC bitrate budget, the network-affiliate bargain, and twenty years of retransmission money.">
+<meta name="twitter:image" content="https://vanpelt.github.io/sparky/tools/dial/og-image.png">
+
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📺</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* ---- page plane ---- */
+  --bg:            #07070f;
+  --bg-2:          #0b0b16;
+  --surface:       #101020;   /* chart surface — palette validated against this */
+  --surface-2:     #16162a;
+  --surface-3:     #1c1c34;
+  --border:        #1e1e36;
+  --border-bright: #30304e;
+
+  /* ---- ink ---- */
+  --text:        #d3d3e2;
+  --text-bright: #f2f2ff;
+  --secondary:   #a3a3bd;
+  --muted:       #7b7b9a;
+
+  /* ---- chart chrome ---- */
+  --grid:     #1e1e33;
+  --baseline: #2b2b47;
+
+  /* ---- categorical series (dark steps, validated vs #101020) ---- */
+  --series-1: #3987e5;  /* blue    */
+  --series-2: #d95926;  /* orange  */
+  --series-3: #199e70;  /* aqua    */
+  --series-4: #c98500;  /* yellow  */
+  --series-5: #d55181;  /* magenta */
+
+  /* ---- status (fixed, never themed) ---- */
+  --good:     #0ca30c;
+  --warning:  #fab219;
+  --serious:  #ec835a;
+  --critical: #d03b3b;
+
+  --display: 'Space Grotesk', system-ui, sans-serif;
+  --sans:    'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono:    'IBM Plex Mono', 'Consolas', monospace;
+
+  --snap:   0.18s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --smooth: 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.68;
+  font-size: 15px;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Faint scanline wash — the one piece of set dressing */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255,255,255,0.012) 0px,
+    rgba(255,255,255,0.012) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  pointer-events: none;
+  z-index: 100;
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+.wrap { max-width: 880px; margin: 0 auto; padding: 0 1.25rem; }
+
+/* ───────────────────────── Header ───────────────────────── */
+
+header.hero {
+  padding: 4.5rem 0 2.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.tally {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--series-2);
+  border: 1px solid rgba(217, 89, 38, 0.35);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  margin-bottom: 1.5rem;
+}
+.tally::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--series-2);
+  box-shadow: 0 0 8px var(--series-2);
+}
+
+header.hero h1 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(2.4rem, 7vw, 4rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--text-bright);
+  margin-bottom: 1rem;
+}
+header.hero h1 em {
+  font-style: normal;
+  color: var(--muted);
+  display: block;
+  font-size: 0.42em;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-top: 0.9rem;
+  line-height: 1.4;
+  max-width: 34ch;
+}
+
+.hero-lede {
+  color: var(--secondary);
+  font-size: 1.02rem;
+  max-width: 62ch;
+  margin-top: 1.5rem;
+}
+
+.asof {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 1.5rem;
+  letter-spacing: 0.02em;
+}
+
+/* Color-bar rule — SMPTE, muted down so it reads as a rule not a toy */
+.colorbars {
+  display: flex;
+  height: 5px;
+  margin-top: 2.25rem;
+  border-radius: 3px;
+  overflow: hidden;
+  opacity: 0.75;
+}
+.colorbars span { flex: 1; }
+
+/* ───────────────────────── Nav ───────────────────────── */
+
+nav.toc {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(7, 7, 15, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+nav.toc ul {
+  display: flex;
+  gap: 0.25rem;
+  list-style: none;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 0.6rem 1.25rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+nav.toc ul::-webkit-scrollbar { display: none; }
+nav.toc a {
+  display: block;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  transition: color var(--snap), background var(--snap);
+}
+nav.toc a:hover { color: var(--text-bright); background: var(--surface-2); }
+
+/* ───────────────────────── Sections ───────────────────────── */
+
+section { padding: 4rem 0 1rem; }
+
+.kicker {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--series-1);
+  margin-bottom: 0.75rem;
+}
+
+h2 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(1.6rem, 4vw, 2.2rem);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--text-bright);
+  margin-bottom: 1rem;
+}
+
+h3 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1.12rem;
+  letter-spacing: -0.01em;
+  color: var(--text-bright);
+  margin: 2.5rem 0 0.75rem;
+}
+
+p { margin-bottom: 1rem; max-width: 68ch; }
+p.lede { font-size: 1.05rem; color: var(--secondary); }
+
+strong { color: var(--text-bright); font-weight: 600; }
+em.term { font-style: normal; color: var(--series-1); font-weight: 500; }
+
+a { color: var(--series-1); text-decoration: none; border-bottom: 1px solid rgba(57, 135, 229, 0.3); }
+a:hover { border-bottom-color: var(--series-1); }
+
+code, .num {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  color: var(--text-bright);
+}
+
+ul.body-list { margin: 0 0 1.25rem 0; padding-left: 1.1rem; max-width: 68ch; }
+ul.body-list li { margin-bottom: 0.5rem; }
+ul.body-list li::marker { color: var(--muted); }
+
+/* ───────────────────────── Cards & tiles ───────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 1.75rem 0;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+}
+.card-title {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text-bright);
+  letter-spacing: -0.01em;
+}
+.card-sub {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-bottom: 1.25rem;
+  max-width: 62ch;
+}
+.card-note {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+  max-width: none;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.75rem;
+  margin: 1.75rem 0;
+}
+.tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.15rem;
+}
+.tile .label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1.4;
+  margin-bottom: 0.5rem;
+}
+.tile .value {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 1.85rem;
+  line-height: 1.1;
+  color: var(--text-bright);
+  letter-spacing: -0.02em;
+}
+.tile .value.sm { font-size: 1.45rem; }
+.tile .delta {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  margin-top: 0.4rem;
+  color: var(--muted);
+}
+.tile .delta.down { color: var(--critical); }
+.tile .delta.up { color: var(--good); }
+
+/* Hero figure — the one number a section leads with */
+.hero-fig {
+  background: var(--surface);
+  border: 1px solid var(--border-bright);
+  border-radius: 12px;
+  padding: 1.75rem;
+  margin: 1.75rem 0;
+}
+.hero-fig .value {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: clamp(2.6rem, 8vw, 3.6rem);
+  line-height: 1;
+  letter-spacing: -0.035em;
+  color: var(--text-bright);
+}
+.hero-fig .label {
+  font-size: 0.9rem;
+  color: var(--secondary);
+  margin-top: 0.75rem;
+  max-width: 54ch;
+}
+
+/* Callout */
+.callout {
+  border-left: 2px solid var(--series-2);
+  background: var(--bg-2);
+  padding: 1rem 1.25rem;
+  margin: 1.75rem 0;
+  border-radius: 0 8px 8px 0;
+}
+.callout p:last-child { margin-bottom: 0; }
+.callout .callout-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--series-2);
+  display: block;
+  margin-bottom: 0.4rem;
+}
+</style>
+<style>
+/* ───────────────────────── Charts ───────────────────────── */
+
+.chart-shell { position: relative; }
+.chart-shell svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+.grid-line   { stroke: var(--grid); stroke-width: 1; }
+.axis-line   { stroke: var(--baseline); stroke-width: 1; }
+.tick-label  {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  fill: var(--muted);
+}
+.axis-title {
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  fill: var(--muted);
+}
+.direct-label {
+  font-family: var(--sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  fill: var(--text-bright);
+}
+.direct-label.soft { fill: var(--secondary); font-weight: 500; }
+.band-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  fill: var(--muted);
+}
+
+.hit { fill: transparent; cursor: default; }
+
+/* Legend — always present for 2+ series */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.1rem;
+  margin-bottom: 1rem;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.79rem;
+  color: var(--secondary);
+}
+.legend-swatch {
+  width: 11px; height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+.legend-swatch.line-swatch { height: 2px; border-radius: 1px; width: 14px; }
+
+/* Tooltip */
+.tip {
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -100%);
+  background: var(--surface-3);
+  border: 1px solid var(--border-bright);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: nowrap;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  transition: opacity var(--snap);
+  z-index: 20;
+}
+.tip.on { opacity: 1; }
+.tip .tip-title {
+  font-weight: 600;
+  color: var(--text-bright);
+  display: block;
+  margin-bottom: 0.2rem;
+}
+.tip .tip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.tip .tip-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tip .tip-val { margin-left: auto; padding-left: 1rem; color: var(--text-bright); font-weight: 600; }
+
+/* Table view — the WCAG-clean twin of every chart */
+.table-toggle {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  padding: 0.28rem 0.6rem;
+  cursor: pointer;
+  flex: none;
+  transition: color var(--snap), border-color var(--snap);
+}
+.table-toggle:hover, .table-toggle[aria-pressed="true"] {
+  color: var(--text-bright);
+  border-color: var(--secondary);
+}
+.data-table { display: none; margin-top: 1rem; }
+.data-table.on { display: block; }
+.data-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.data-table th, .data-table td {
+  text-align: right;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.data-table th:first-child, .data-table td:first-child { text-align: left; }
+.data-table th {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+.data-table td { color: var(--text); }
+.data-table td:first-child { color: var(--text-bright); }
+
+/* ───────────────────────── Band map ───────────────────────── */
+
+.bandmap { margin: 1.25rem 0 0; }
+.band-row { margin-bottom: 1rem; }
+.band-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 0.4rem;
+}
+.band-row-head .hz { color: var(--secondary); }
+.chan-strip { display: flex; gap: 2px; flex-wrap: wrap; }
+.chan {
+  flex: 1 1 auto;
+  min-width: 26px;
+  max-width: 58px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-align: center;
+  padding: 0.4rem 0.1rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--secondary);
+  cursor: pointer;
+  transition: background var(--snap), color var(--snap), border-color var(--snap);
+}
+.chan:hover { background: var(--surface-3); color: var(--text-bright); }
+.chan[aria-pressed="true"] {
+  background: rgba(57, 135, 229, 0.18);
+  border-color: var(--series-1);
+  color: var(--text-bright);
+}
+.chan.gone {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--border);
+  color: var(--muted);
+  opacity: 0.55;
+}
+.chan.reserved { background: transparent; border-color: var(--border); color: var(--muted); opacity: 0.7; }
+
+.chan-readout {
+  margin-top: 1.1rem;
+  padding: 1rem 1.15rem;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 96px;
+}
+.chan-readout .ro-chan {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.5rem;
+  color: var(--text-bright);
+  letter-spacing: -0.02em;
+}
+.chan-readout .ro-hz {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--series-1);
+  margin-top: 0.15rem;
+}
+.chan-readout .ro-note {
+  font-size: 0.82rem;
+  color: var(--secondary);
+  margin-top: 0.6rem;
+  max-width: 60ch;
+}
+
+/* ───────────────────────── Bitrate budget ───────────────────────── */
+
+.mux { margin-top: 0.5rem; }
+.mux-bar {
+  display: flex;
+  height: 46px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface-2);
+  gap: 2px;              /* the 2px surface gap between segments */
+  border: 1px solid var(--border);
+}
+.mux-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: #fff;
+  transition: flex-basis var(--smooth), background var(--snap);
+  overflow: hidden;
+  white-space: nowrap;
+  min-width: 0;
+}
+.mux-seg.main { background: var(--series-1); }
+.mux-seg.sub  { background: var(--series-3); }
+.mux-seg.free { background: var(--surface-3); color: var(--muted); }
+
+.mux-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 1.1rem 0 0;
+}
+.chip {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--secondary);
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+  transition: all var(--snap);
+}
+.chip:hover { border-color: var(--border-bright); color: var(--text-bright); }
+.chip[aria-pressed="true"] {
+  background: rgba(25, 158, 112, 0.16);
+  border-color: var(--series-3);
+  color: var(--text-bright);
+}
+.chip.main-chip[aria-pressed="true"] {
+  background: rgba(57, 135, 229, 0.18);
+  border-color: var(--series-1);
+}
+
+.verdict {
+  margin-top: 1.1rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+}
+.verdict .v-icon { font-family: var(--mono); font-weight: 500; flex: none; }
+.verdict.good     { border-color: rgba(12,163,12,0.4); }
+.verdict.good .v-icon     { color: var(--good); }
+.verdict.warning  { border-color: rgba(250,178,25,0.4); }
+.verdict.warning .v-icon  { color: var(--warning); }
+.verdict.critical { border-color: rgba(208,59,59,0.45); }
+.verdict.critical .v-icon { color: var(--critical); }
+
+/* ───────────────────────── Money flow ───────────────────────── */
+
+.flow-toggle {
+  display: inline-flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+  margin-bottom: 1.25rem;
+}
+.flow-toggle button {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 0.4rem 0.95rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--snap);
+}
+.flow-toggle button[aria-pressed="true"] {
+  background: var(--surface-3);
+  color: var(--text-bright);
+}
+
+.flow-node rect { transition: fill var(--smooth); }
+.flow-label { font-family: var(--sans); font-size: 12px; font-weight: 600; fill: var(--text-bright); }
+.flow-sub   { font-family: var(--mono); font-size: 9.5px; fill: var(--muted); }
+.flow-money { font-family: var(--sans); font-size: 10.5px; font-weight: 600; }
+.flow-arrow { transition: opacity var(--smooth), stroke var(--smooth); }
+
+/* ───────────────────────── Timeline ───────────────────────── */
+
+.timeline { margin: 1.5rem 0; position: relative; padding-left: 1.5rem; }
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 4px; top: 6px; bottom: 6px;
+  width: 1px;
+  background: var(--border-bright);
+}
+.tl-item { position: relative; margin-bottom: 1.35rem; }
+.tl-item::before {
+  content: '';
+  position: absolute;
+  left: -1.5rem; top: 6px;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--series-1);
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.tl-item.alarm::before { background: var(--critical); }
+.tl-item.open::before  { background: var(--surface); box-shadow: 0 0 0 2px var(--bg), inset 0 0 0 1.5px var(--muted); }
+.tl-date {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  display: block;
+}
+.tl-body { font-size: 0.89rem; color: var(--secondary); margin-top: 0.15rem; max-width: 64ch; }
+.tl-body strong { color: var(--text-bright); }
+
+/* ───────────────────────── Split / clock ───────────────────────── */
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin: 1.5rem 0; }
+@media (max-width: 620px) { .split { grid-template-columns: 1fr; } }
+.split-col {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+}
+.split-col h4 {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 0.7rem;
+  font-weight: 500;
+}
+.split-col.net h4 { color: var(--series-1); }
+.split-col.sta h4 { color: var(--series-2); }
+.split-col ul { list-style: none; font-size: 0.85rem; }
+.split-col li {
+  padding: 0.3rem 0;
+  color: var(--secondary);
+  border-bottom: 1px solid var(--border);
+}
+.split-col li:last-child { border-bottom: 0; }
+.split-col li span { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); display: block; }
+
+/* ───────────────────────── Sources / footer ───────────────────────── */
+
+.sources { font-size: 0.82rem; }
+.sources ol { padding-left: 1.2rem; max-width: 72ch; }
+.sources li { margin-bottom: 0.45rem; color: var(--muted); }
+.sources a { color: var(--secondary); border-bottom-color: rgba(163,163,189,0.25); }
+.sources a:hover { color: var(--series-1); }
+
+footer.page-foot {
+  margin-top: 4rem;
+  padding: 2rem 0 3rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* Below this width an SVG scaled to the column renders its labels too small to
+   read, so the chart keeps a legible minimum width and the card scrolls to it.
+   The padding/negative-margin pair gives the tooltip room inside the scroll box. */
+@media (max-width: 680px) {
+  .chart-shell {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-top: 2.75rem;
+    margin-top: -2.75rem;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-bright) transparent;
+  }
+  .chart-shell svg { min-width: 560px; }
+  #flow-svg { min-width: 640px; }
+}
+
+@media (max-width: 560px) {
+  body { font-size: 14.5px; }
+  .card { padding: 1.15rem; }
+  .chan { min-width: 22px; font-size: 0.66rem; padding: 0.35rem 0; }
+}
+</style>
+</head>
+<body data-palette="#3987e5,#d95926,#199e70,#c98500,#d55181">
+
+<header class="hero">
+  <div class="wrap">
+    <div class="tally">On Air</div>
+    <h1>The Dial<em>How broadcast television actually works — and what the networks and their local stations are worth now.</em></h1>
+    <p class="hero-lede">Over-the-air television is the oldest surviving piece of American media infrastructure: a licensed slice of radio spectrum, a satellite feed, and a 70-year-old bargain between national networks and the local stations that carry them. The plumbing has barely changed. The money has changed completely — and in the last twenty years it changed twice.</p>
+    <p class="asof">Figures current to 20 September 2026. Sources listed at the end.</p>
+    <div class="colorbars">
+      <span style="background:#8a8a8a"></span><span style="background:#c9c400"></span><span style="background:#00c9c4"></span><span style="background:#00c400"></span><span style="background:#c400c4"></span><span style="background:#c40000"></span><span style="background:#0000c4"></span>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <ul>
+    <li><a href="#signal">1 · The signal</a></li>
+    <li><a href="#pipe">2 · The pipe</a></li>
+    <li><a href="#bargain">3 · The bargain</a></li>
+    <li><a href="#money">4 · Follow the money</a></li>
+    <li><a href="#twenty">5 · Twenty years</a></li>
+    <li><a href="#worth">6 · What's a network worth</a></li>
+    <li><a href="#affiliates">7 · The affiliates</a></li>
+    <li><a href="#next">8 · What happens next</a></li>
+  </ul>
+</nav>
+
+<main class="wrap">
+
+<!-- ══════════════════ 1 · THE SIGNAL ══════════════════ -->
+<section id="signal">
+  <div class="kicker">Part One</div>
+  <h2>A television station is a six-megahertz hole in the air</h2>
+
+  <p class="lede">Everything else about the business is downstream of one physical fact: the FCC licenses a broadcaster to radiate on a <strong>6 MHz-wide channel</strong> over a defined geographic area, and nobody else may use that frequency there. That license is the asset. The studio, the anchors, the news van — those are costs.</p>
+
+  <p>The channel numbers you grew up with are frequency allocations. Channel 2 is 54–60 MHz; channel 7 is 174–180 MHz; channel 14 is 470–476 MHz. Two bands were carved out in the 1940s and 50s — <em class="term">VHF</em>, which propagates far and bends around terrain but needs an enormous antenna, and <em class="term">UHF</em>, which is closer to line-of-sight but supports far more channels. A full-power UHF station radiating up to 1,000 kW from a tall tower covers roughly a 60-mile radius.</p>
+
+  <p>Since the 2009 digital transition there's a wrinkle: the number on your screen is a <em class="term">virtual channel</em>, carried in the signal's metadata. WNBC still says "4" on your TV, but it hasn't transmitted on RF channel 4 in years. The branding survived; the physics moved.</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">The US television band, and what's left of it</div>
+      </div>
+    </div>
+    <div class="card-sub">Every channel is 6 MHz wide. Click one to see its real frequency and its status. Dashed channels were sold out from under broadcasting and now belong to mobile carriers.</div>
+    <div class="bandmap" id="bandmap"></div>
+    <div class="chan-readout" id="chan-readout" role="status" aria-live="polite"></div>
+    <div class="card-note">Channel 37 has never carried television anywhere in the United States: it was set aside in 1963 for radio astronomy and medical telemetry, and it is still empty. Channels 70–83 went to cellular in 1983, 52–69 were auctioned in 2008, and 38–51 were bought back from broadcasters in the 2017 incentive auction.</div>
+  </div>
+
+  <div class="callout">
+    <span class="callout-label">The moment the spectrum got a price tag</span>
+    <p>In 2017 the FCC ran a two-sided auction: stations bid to <em>give up</em> their licenses, carriers bid to buy the freed spectrum. It raised <strong>$19.8 billion</strong>, of which <strong>$10.05 billion</strong> went to broadcasters who took the money and went dark. Roughly 175 stations left the air, and every surviving station in the band was "repacked" onto a new frequency. For a lot of small-market operators, the arithmetic was brutal and clarifying: the empty spectrum was worth more than the television station sitting on it.</p>
+  </div>
+</section>
+
+<!-- ══════════════════ 2 · THE PIPE ══════════════════ -->
+<section id="pipe">
+  <div class="kicker">Part Two</div>
+  <h2>What fits in the pipe</h2>
+
+  <p class="lede">A 6 MHz channel under <em class="term">ATSC 1.0</em> — the digital standard the US has used since 1998 — carries exactly <span class="num">19.39 Mbps</span>. Not "about." That is the fixed payload of 8VSB modulation in a 6 MHz channel, and it is the single most consequential number in over-the-air picture quality.</p>
+
+  <p>That budget is why your local station's picture sometimes looks softer than the same network feed on cable. Subchannels — the <span class="num">.2</span> and <span class="num">.3</span> feeds running MeTV, Antenna TV, a weather radar loop, a shopping channel — are free money for the station. Each one is also bandwidth stolen from the main HD feed, because they all share the same 19.39.</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">The multiplex budget</div></div>
+    </div>
+    <div class="card-sub">Switch the main feed's format and add subchannels. Watch what's left for the picture people actually tune in for.</div>
+
+    <div class="mux">
+      <div class="mux-bar" id="mux-bar" role="img" aria-label="Bitrate allocation across the 19.39 Mbps ATSC 1.0 multiplex"></div>
+      <div class="mux-controls" id="mux-main"></div>
+      <div class="mux-controls" id="mux-subs"></div>
+      <div class="verdict" id="mux-verdict"></div>
+    </div>
+    <div class="card-note">Bitrates are typical operating figures, not hard limits — stations statistically multiplex, so a talk show and a football game draw very differently from the same pool. The pool itself is fixed.</div>
+  </div>
+
+  <h3>ATSC 3.0, and why the transition is a fight</h3>
+
+  <p>The replacement standard, marketed as <em class="term">NextGen TV</em>, throws out 8VSB for OFDM, wraps everything in IP, and swaps MPEG-2 for HEVC. Practically: roughly 25 Mbps of far more efficient video in the same 6 MHz, 4K and HDR, per-household targeted advertising, and the ability to datacast to things that aren't televisions at all.</p>
+
+  <div class="split">
+    <div class="split-col net">
+      <h4>ATSC 1.0 — 1998</h4>
+      <ul>
+        <li>8VSB modulation<span>fixed 19.39 Mbps payload</span></li>
+        <li>MPEG-2 video, AC-3 audio<span>1080i / 720p ceiling</span></li>
+        <li>One-way broadcast<span>no return path, no addressing</span></li>
+        <li>Works on every TV sold since 2007<span>tuner mandate, ~100% penetration</span></li>
+      </ul>
+    </div>
+    <div class="split-col sta">
+      <h4>ATSC 3.0 — NextGen TV</h4>
+      <ul>
+        <li>OFDM, IP transport<span>~25 Mbps typical, tunable robustness</span></li>
+        <li>HEVC video, AC-4 audio<span>4K HDR, immersive audio</span></li>
+        <li>Addressable + datacasting<span>targeted ads, non-TV data services</span></li>
+        <li>Not backward compatible<span>needs a new tuner, and may carry DRM</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <p>"Not backward compatible" is the whole problem. Until now the FCC has required stations moving to 3.0 to keep simulcasting a 1.0 signal, which means finding a partner station's spectrum to host it — an expensive, market-by-market game of musical chairs. In October 2025 the Commission proposed ending that requirement. The broadcasters' trade association wants the top 55 markets fully converted by February 2028 and everyone else by February 2030; public broadcasters have asked the FCC not to set a hard date at all, because their viewers skew toward exactly the households least likely to buy a new television. As of this writing there is no final order, and the tuner-mandate and DRM questions are still open.</p>
+</section>
+
+<!-- ══════════════════ 3 · THE BARGAIN ══════════════════ -->
+<section id="bargain">
+  <div class="kicker">Part Three</div>
+  <h2>The network is not the station</h2>
+
+  <p class="lede">This is the part most people have backwards. <strong>ABC, CBS, NBC and Fox do not transmit anything.</strong> A network is a programming supplier and a national advertising sales house. It owns a handful of stations outright — the <em class="term">O&amp;Os</em>, concentrated in New York, Los Angeles, Chicago and a dozen other big markets — and in every other market it rents reach from a station somebody else owns.</p>
+
+  <p>There are about <strong>1,390 commercial full-power television stations</strong> in the US, plus roughly 390 noncommercial ones, distributed across <strong>210 markets</strong>. Nielsen draws those markets — <em class="term">DMAs</em>, designated market areas — county by county, with no gaps and no overlaps, so every American household sits in exactly one. Market 1 is New York. Market 210 is Glendive, Montana, with about 3,500 television households.</p>
+
+  <p>Each network feeds its schedule by satellite to roughly 200 affiliates, who retransmit it locally. The day is carved up by contract:</p>
+
+  <div class="split">
+    <div class="split-col net">
+      <h4>The network takes</h4>
+      <ul>
+        <li>Primetime<span>8–11pm, the expensive hours</span></li>
+        <li>Morning and late night<span>Today, GMA, the Tonight Show</span></li>
+        <li>National news<span>the 6:30 evening broadcast</span></li>
+        <li>Sports<span>the NFL, and the reason any of this still works</span></li>
+      </ul>
+    </div>
+    <div class="split-col sta">
+      <h4>The station keeps</h4>
+      <ul>
+        <li>Local news<span>often 5–7 hours a day now</span></li>
+        <li>Syndicated programming<span>Wheel, Jeopardy!, court shows</span></li>
+        <li>Local ad inventory<span>a fixed allotment inside network shows</span></li>
+        <li>The transmitter and the license<span>the thing the FCC actually regulates</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <p>A network affiliation is not permanent. Affiliates switch — sometimes spectacularly, as when Fox bought its way into the NFL in 1994 and pulled twelve CBS stations over to the new network in a single stroke, a move that is still the reference case for what network programming is worth to a local station.</p>
+</section>
+
+<!-- ══════════════════ 4 · FOLLOW THE MONEY ══════════════════ -->
+<section id="money">
+  <div class="kicker">Part Four</div>
+  <h2>Follow the money — and watch one arrow flip</h2>
+
+  <p class="lede">Three streams of money run through broadcast television, and the direction of the third one is the single biggest change in the industry's economics in the last twenty years.</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">Where the money goes</div></div>
+    </div>
+    <div class="card-sub">Same diagram, two decades. The arrow between the network and its affiliate reverses.</div>
+
+    <div class="flow-toggle" role="group" aria-label="Choose era">
+      <button type="button" data-era="2005" aria-pressed="false">2005</button>
+      <button type="button" data-era="2026" aria-pressed="true">2026</button>
+    </div>
+
+    <div class="chart-shell">
+      <svg id="flow-svg" viewBox="0 0 700 330" role="img" aria-labelledby="flow-title"></svg>
+    </div>
+    <div class="card-note" id="flow-note"></div>
+  </div>
+
+  <h3>1 &amp; 2 — the advertising, which everybody understands</h3>
+  <p>National advertisers buy the network; local advertisers — car dealers, personal injury lawyers, furniture stores, and every other election year, political campaigns — buy the station. Each side keeps what it sells. That split has been stable since the 1950s.</p>
+
+  <h3>3 — retransmission consent, which nobody outside the business understands</h3>
+
+  <p>The 1992 Cable Act gave every commercial station a choice, renewed every three years: demand <em class="term">must-carry</em>, where the cable system has to carry you but pays nothing, or elect <em class="term">retransmission consent</em>, where the cable system must negotiate for your signal and may be told no. For over a decade almost nobody could actually extract cash. Cable operators paid in kind instead — that is literally how Fox News got its initial carriage.</p>
+
+  <p>Then, starting around 2006, stations began winning real money. And because the network supplies the programming that makes the station worth carrying, the network came back for its cut. That cut is <em class="term">reverse compensation</em>: the affiliate pays the network a per-subscriber fee for the right to keep the affiliation.</p>
+
+  <div class="callout">
+    <span class="callout-label">The inversion</span>
+    <p>Before this, networks <em>paid</em> affiliates to carry their shows — "network compensation," a line item that ran for fifty years. Today the affiliate pays the network, and the networks take <strong>more than half</strong> of the retransmission money the stations collect. The relationship didn't just change price. It changed sign.</p>
+  </div>
+
+  <p>This is why a station group's headline retransmission revenue is nearly meaningless on its own. The number that matters is <em class="term">net retrans</em> — gross receipts from cable, satellite and streaming bundles, minus what the network takes back. Gray Media's net retransmission revenue was <span class="num">$150 million</span> in the second quarter of 2026, up 10% from $136 million a year earlier, even as the gross number had been falling. Both the subscriber count and the reverse-comp rate move, and they don't move together.</p>
+</section>
+
+<!-- ══════════════════ 5 · TWENTY YEARS ══════════════════ -->
+<section id="twenty">
+  <div class="kicker">Part Five</div>
+  <h2>Twenty years, in four numbers</h2>
+
+  <p class="lede">In 2005 the networks were an advertising business with a ratings problem. Today they are a sports-rights business with a toll booth attached, and the toll booth has started to leak.</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">Retransmission fee revenue, US local TV stations</div></div>
+      <button class="table-toggle" type="button" data-table="tbl-retrans" aria-pressed="false">Table</button>
+    </div>
+    <div class="card-sub">A revenue line that did not exist, then grew sixty-fold in fifteen years, then stopped. Figures from Kagan / S&amp;P Global; 2022 onward are that firm's projections.</div>
+    <div class="chart-shell" id="chart-retrans"></div>
+    <div class="data-table" id="tbl-retrans"></div>
+    <div class="card-note">Growth in this line came from two multiplying factors: the per-subscriber rate, which rose relentlessly, and the number of subscribers, which started falling off a cliff around 2015. For a decade the rate outran the losses. It no longer does — S&amp;P Global Ratings now forecasts modest <em>declines</em> in both retransmission and core advertising revenue for stations, with EBITDA gradually eroding.</div>
+  </div>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="label">Pay-TV households, 2015</div>
+      <div class="value">~100M</div>
+      <div class="delta">the base retrans is billed against</div>
+    </div>
+    <div class="tile">
+      <div class="label">Pay-TV households, 2025</div>
+      <div class="value">~45M</div>
+      <div class="delta down">▼ 55 million in ten years</div>
+    </div>
+    <div class="tile">
+      <div class="label">Retrans revenue, 2006</div>
+      <div class="value sm">$215M</div>
+      <div class="delta">the entire industry</div>
+    </div>
+    <div class="tile">
+      <div class="label">Retrans revenue, 2021</div>
+      <div class="value sm">$14.1B</div>
+      <div class="delta up">▲ 65× in fifteen years</div>
+    </div>
+  </div>
+
+  <h3>The audience, meanwhile</h3>
+
+  <p>Broadcast's advertising currency is the rating among adults 18–49 — one rating point is one percent of that population. Here is the entire 2025–26 primetime season:</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">Primetime rating, adults 18–49 · 2025–26 season</div></div>
+      <button class="table-toggle" type="button" data-table="tbl-demo" aria-pressed="false">Table</button>
+    </div>
+    <div class="card-sub">NBC won the season — its first total-viewers win since 2002 — on the strength of sports.</div>
+    <div class="chart-shell" id="chart-demo"></div>
+    <div class="data-table" id="tbl-demo"></div>
+  </div>
+
+  <div class="hero-fig">
+    <div class="value">12.6</div>
+    <div class="label">The rating <em>American Idol</em> alone averaged among adults 18–49 in its 2006 season, when it drew 30.6 million viewers an episode. One show, twenty years ago, was worth more than twelve times what the number-one network now averages across all of primetime.</div>
+  </div>
+
+  <p>Two honest caveats. Nielsen's methodology has changed, and today's numbers exclude a great deal of delayed and streamed viewing that eventually gets counted elsewhere. And the Big Four still sold a record <span class="num">$9.3 billion</span> of upfront advertising in 2006 — the absolute dollars did not fall as fast as the ratings, because scarcity of mass reach props up the price per viewer. But the direction is not in dispute, and the networks' answer to it has been the same for a decade: buy more sports.</p>
+</section>
+
+<!-- ══════════════════ 6 · WHAT'S A NETWORK WORTH ══════════════════ -->
+<section id="worth">
+  <div class="kicker">Part Six</div>
+  <h2>So what is a broadcast network actually worth?</h2>
+
+  <p class="lede">Hard to answer directly, because three of the four are buried inside conglomerates that never report them separately. Fox is the exception, and Fox's own segment disclosure is the most revealing document in American television.</p>
+
+  <p>Fox Corporation splits into a Television segment — the Fox network, its owned stations, and Tubi — and a Cable Network Programming segment that is overwhelmingly Fox News. Here are both, over the first nine months of fiscal 2026:</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">Fox Corporation by segment · nine months ended 31 March 2026</div></div>
+      <button class="table-toggle" type="button" data-table="tbl-fox" aria-pressed="false">Table</button>
+    </div>
+    <div class="card-sub">Revenue and segment EBITDA, in billions of dollars. Margin is labelled directly on each pair.</div>
+    <div class="chart-shell" id="chart-fox"></div>
+    <div class="data-table" id="tbl-fox"></div>
+    <div class="card-note">A broadcast network, a full station group and a streaming service, together, earned <strong>$733 million</strong>. One cable news channel earned <strong>$2.37 billion</strong> — on less revenue. That ratio is the reason nobody is bidding aggressively for broadcast networks.</div>
+  </div>
+
+  <p>The broadcast business converts about ten cents of every revenue dollar into operating profit. The cable business converts forty-two. Broadcast carries the transmitters, the local news payrolls, the affiliate relationships, the FCC licence obligations, and — above all — the sports rights.</p>
+
+  <h3>The sports problem, which is also the sports answer</h3>
+
+  <p>The NFL's current media agreements run 2023 through 2033 and total roughly <span class="num">$110 billion</span> — about $10 billion a year, with CBS, Fox and NBC each paying somewhere in the $2.0–2.2 billion range annually and ESPN/ABC around $2.7 billion. There is an opt-out roughly seven years in, which means this all gets repriced around 2029, with Amazon, Netflix and YouTube in the room.</p>
+
+  <p>Sports is why broadcast still matters — it is the last reliable way to put fifteen to twenty million Americans in front of the same thing at the same time, and the rights are contractually tied to free over-the-air reach. It is also what makes the margins thin. The networks are, in a real sense, pass-through vehicles for sports leagues now.</p>
+
+  <h3>The revealed preferences</h3>
+
+  <ul class="body-list">
+    <li><strong>Disney floated selling ABC in 2023.</strong> Analysts put it around <span class="num">$8 billion</span> — for a network that reaches every US household. Disney didn't sell. It sold its 50% of A+E to Hearst instead, for about $1.2 billion, closing August 2026.</li>
+    <li><strong>Comcast spun off its cable networks and kept NBC.</strong> Versant — CNBC, USA, Syfy, Golf, E!, MS NOW — began trading on 5 January 2026 at a deliberately modest valuation. The broadcast network stayed. That is the clearest statement anyone has made about relative value: cable nets are the melting asset, broadcast is still worth holding for sports and reach.</li>
+    <li><strong>Paramount, under Skydance since August 2025, went and bought Warner Bros. Discovery</strong> — $31.00 a share, roughly $111 billion, DOJ-approved in June 2026 and now tied up in litigation with an antitrust trial calendared for March 2027. Note what the prize was: the studio, HBO and the streaming subscribers. CBS was already in the building and nobody talked about it much.</li>
+  </ul>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="label">Fox Corp market cap</div>
+      <div class="value sm">$27.2B</div>
+      <div class="delta">on $17.1B revenue · 18 Sep 2026</div>
+    </div>
+    <div class="tile">
+      <div class="label">ABC, analyst estimate</div>
+      <div class="value sm">~$8B</div>
+      <div class="delta">2023, when a sale was floated</div>
+    </div>
+    <div class="tile">
+      <div class="label">NFL rights, per year</div>
+      <div class="value sm">~$10B</div>
+      <div class="delta">across all partners, 2023–33</div>
+    </div>
+    <div class="tile">
+      <div class="label">Fox TV segment margin</div>
+      <div class="value sm">10.2%</div>
+      <div class="delta down">vs 41.8% for Fox News</div>
+    </div>
+  </div>
+
+  <p>The fair summary: the <em>parents</em> are worth a great deal. The networks, valued as standalone assets stripped of their parent's streaming service and their sports contracts, are worth surprisingly little — a single-digit-billions business attached to a multi-billion-dollar annual obligation. What they still own is the last mass audience in America, and an obligation to pay dearly for it.</p>
+</section>
+
+<!-- ══════════════════ 7 · THE AFFILIATES ══════════════════ -->
+<section id="affiliates">
+  <div class="kicker">Part Seven</div>
+  <h2>The local affiliates are where this gets grim</h2>
+
+  <p class="lede">Local stations were rolled up into a handful of public companies during the 2013–2019 merger wave, financed with debt, underwritten on an assumption that retransmission revenue would keep compounding. It didn't. The equity is what absorbed the difference.</p>
+
+  <div class="card">
+    <div class="card-head">
+      <div><div class="card-title">Station groups: market capitalisation against annual revenue</div></div>
+      <button class="table-toggle" type="button" data-table="tbl-groups" aria-pressed="false">Table</button>
+    </div>
+    <div class="card-sub">Billions of dollars. Trailing-twelve-month revenue and market capitalisation at the close of 18 September 2026.</div>
+    <div class="chart-shell" id="chart-groups"></div>
+    <div class="data-table" id="tbl-groups"></div>
+    <div class="card-note">Gray Media turns over $3.15 billion a year and the entire equity is valued at <strong>$435 million</strong>, against roughly $5.6 billion of long-term debt. Scripps turns over $2.09 billion; its equity is worth $280 million. These are not businesses without revenue. They are businesses whose enterprise value has quietly transferred to their lenders.</div>
+  </div>
+
+  <p>S&amp;P has Sinclair, Gray, Scripps and Cox Media Group all on negative outlook, with debt maturities concentrating from 2026 onward and refinancing risk if free cash flow doesn't go to paydown. Scripps announced a cost-cutting programme and layoffs in 2026; its net leverage sits at 3.9×.</p>
+
+  <p>The revenue mix explains the fragility. Across the sector roughly <strong>half</strong> of station revenue is advertising, about <strong>41%</strong> is retransmission, and the remaining <strong>9%</strong> is digital. Depending on the group, somewhere between a third and half of all revenue rides on retrans — a line that is now flat to declining, and on which the network takes its cut first.</p>
+
+  <h3>Fighting on two fronts at once</h3>
+
+  <p>Affiliates are now in conflict with their distributors <em>and</em> with their own networks, simultaneously.</p>
+
+  <p><strong>Against distributors:</strong> blackouts. E.W. Scripps pulled 54 stations off DirecTV in 36 markets on 31 May 2026 — Cleveland, Denver, Detroit, Phoenix, Tampa, Baltimore — and kept them off for five weeks before a deal on 10 July. This is now a routine negotiating instrument rather than a crisis.</p>
+
+  <p><strong>Against their networks:</strong> in 2026 the affiliate boards of all four networks filed joint comments at the FCC. Two complaints. First, they have no ability to negotiate their own rates with virtual providers like YouTube TV — those terms are network-dictated, take it or leave it. Second, and more fundamentally, the networks are now delivering the same premium programming directly to consumers through Peacock, Paramount+, Fox One and Hulu, bypassing the local station that pays for the affiliation. The affiliates have also asked the FCC to protect local sports rights from being pulled up to the national level. Chairman Carr's FCC has opened a proceeding into the network-affiliate relationship.</p>
+
+  <div class="callout">
+    <span class="callout-label">The structural bind</span>
+    <p>An affiliate pays its network for programming, out of money collected from a pay-TV bundle that is shrinking, while the network uses that same programming to build a direct-to-consumer product that accelerates the shrinking. Every participant is behaving rationally. The arrangement still cannot hold.</p>
+  </div>
+
+  <h3>Consolidation is the plan, and it is stuck in court</h3>
+
+  <p>The industry's answer is scale: bigger groups, more leverage against both distributors and networks. The test case is Nexstar's acquisition of Tegna, and it is a mess.</p>
+
+  <div class="timeline">
+    <div class="tl-item">
+      <span class="tl-date">August 2025</span>
+      <div class="tl-body"><strong>Nexstar agrees to buy Tegna for $6.2 billion.</strong> The combination would run 265 stations across 44 states and reach roughly 80% of US television households — far beyond the 39% national ownership cap Congress set in 2004.</div>
+    </div>
+    <div class="tl-item">
+      <span class="tl-date">19–20 March 2026</span>
+      <div class="tl-body"><strong>The FCC Media Bureau approves it and waives the cap</strong>, accepting a reach of 54.5% of TV households after the UHF discount. Nexstar commits to divesting a station in six overlapping markets. The deal closes the same day.</div>
+    </div>
+    <div class="tl-item alarm">
+      <span class="tl-date">27 March → 17 April 2026</span>
+      <div class="tl-body"><strong>A federal judge freezes it.</strong> On suit by state attorneys general, Judge Troy Nunley in the Eastern District of California issues a temporary restraining order, then a preliminary injunction. The purchase has closed, but Nexstar is barred from integrating Tegna, which keeps operating autonomously inside its own owner.</div>
+    </div>
+    <div class="tl-item">
+      <span class="tl-date">6 August 2026</span>
+      <div class="tl-body"><strong>The FCC scraps the national ownership cap outright</strong>, 2–1, replacing the 39% limit with case-by-case review. Commissioner Gomez dissents, arguing the cap is a statute and only Congress can repeal it. Court challenges are expected.</div>
+    </div>
+    <div class="tl-item open">
+      <span class="tl-date">2027</span>
+      <div class="tl-body">Nexstar's appeal to the Ninth Circuit is pending; failing that, a jury trial. The largest consolidation in local television history is, as of today, bought but not assembled.</div>
+    </div>
+  </div>
+
+  <h3>The one thing going right</h3>
+
+  <p>Political advertising. 2026 is a record midterm: BIA projects <span class="num">$9.7 billion</span> of local political spending, with AdImpact putting roughly <span class="num">$5.6 billion</span> of it on broadcast television — about 30% above 2022. Stations are required to sell candidates time at the lowest unit rate, but the volume more than compensates, and it lands disproportionately in swing-state markets.</p>
+
+  <p>It is also a drug. Even-year political revenue masks the underlying trend, odd years are brutal by comparison, and no station group has ever been able to borrow against it.</p>
+</section>
+
+<!-- ══════════════════ 8 · WHAT HAPPENS NEXT ══════════════════ -->
+<section id="next">
+  <div class="kicker">Part Eight</div>
+  <h2>Four things to watch</h2>
+
+  <ul class="body-list">
+    <li><strong>The ATSC 3.0 endgame.</strong> No final FCC order yet. If the simulcast requirement dies and a hard sunset lands, broadcasters get a genuinely modern pipe — addressable advertising, datacasting, automotive and emergency services they can sell outside television entirely. If a tuner mandate doesn't come with it, they get a standard most households can't receive.</li>
+    <li><strong>Whether the ownership-cap repeal survives.</strong> The FCC replaced a statutory limit by rule. That is exactly the argument that will be made against it. If it holds, expect the remaining groups to consolidate down to three or four; if it falls, Nexstar–Tegna may be the high-water mark.</li>
+    <li><strong>The 2029 sports repricing.</strong> The NFL's opt-out arrives with streamers holding more cash than the networks. A package moving off broadcast wouldn't just cost a network ratings — it would strip the affiliates' reason to pay reverse compensation.</li>
+    <li><strong>Whether the affiliate model survives the networks' own apps.</strong> The FCC proceeding into network-affiliate relations is the first regulatory look at this in a generation. There is no obvious remedy that doesn't take money from one side and hand it to the other.</li>
+  </ul>
+
+  <p>None of this touches the transmitters. A station will still be a 6 MHz channel radiating over a county map drawn by Nielsen, and somebody will still own that licence. The open question has never been whether broadcast television works. It is who gets paid for it.</p>
+</section>
+
+<!-- ══════════════════ SOURCES ══════════════════ -->
+<section id="sources" class="sources">
+  <div class="kicker">Sources</div>
+  <h2>Where the numbers come from</h2>
+  <ol>
+    <li>Fox Corporation, <a href="https://www.sec.gov/Archives/edgar/data/0001754301/000162828026033145/foxearningsreleaseq326.htm">Q3 FY2026 earnings release</a> (SEC Form 8-K) — segment revenue and EBITDA.</li>
+    <li>Pew Research Center, <a href="https://www.pewresearch.org/chart/sotnm-local-tv-u-s-local-tv-station-retransmission-fee-revenue/">Retransmission fee revenue for U.S. local TV stations</a>, from Kagan / S&amp;P Global Market Intelligence estimates and projections.</li>
+    <li>FCC, <a href="https://www.fcc.gov/about-fcc/fcc-initiatives/incentive-auctions">Broadcast Incentive Auction and Post-Auction Transition</a>, and <a href="https://www.everycrsreport.com/reports/IF10751.html">CRS, <em>TV Broadcast Incentive Auction: Results and Repacking</em></a>.</li>
+    <li>FCC, <a href="https://www.fcc.gov/document/fcc-replaces-national-broadcast-ownership-cap">FCC Replaces National Broadcast Ownership Cap</a>, 6 August 2026.</li>
+    <li>Broadcast Law Blog, <a href="https://www.broadcastlawblog.com/2026/03/articles/fcc-media-bureau-approves-nexstars-acquisition-of-tegna-what-does-it-mean-for-consideration-of-the-broadcast-ownership-rules/">FCC Media Bureau Approves Nexstar's Acquisition of TEGNA</a>, March 2026.</li>
+    <li>NY Attorney General, <a href="https://ag.ny.gov/press-release/2026/attorney-general-james-wins-court-order-halting-nexstar-tegna-merger">court order halting the Nexstar–Tegna merger</a>; <a href="https://www.npr.org/2026/04/17/nx-s1-5789059/judge-halts-nexstar-tegna-merger-lawsuits">NPR</a> and <a href="https://variety.com/2026/tv/news/nexstar-tegna-preliminary-injunction-judge-block-directv-1236724913/">Variety</a> on the preliminary injunction.</li>
+    <li>Comm Law Center, <a href="https://www.commlawcenter.com/2025/10/a-simulcast-sunset-on-the-horizon-as-fcc-adopts-nextgen-tv-nprm.html">A Simulcast Sunset on the Horizon as FCC Adopts NextGen TV NPRM</a>; <a href="https://www.newscaststudio.com/2026/01/20/nab-pushes-fcc-for-date-certain-end-to-atsc-1-0-in-latest-regulatory-filing/">NAB's filing for a date-certain ATSC 1.0 sunset</a>.</li>
+    <li>The Desk, <a href="https://thedesk.net/2026/06/tv-affiliates-abc-cbs-fox-nbc-complaint-fcc-distribution-model/">affiliate groups' joint FCC comments</a>; <a href="https://www.newscaststudio.com/2026/04/16/network-affiliates-ask-fcc-to-protect-local-sports-rights-from-networks-and-streamers-alike/">NewscastStudio on local sports rights</a>.</li>
+    <li><a href="https://deadline.com/2026/07/scripps-directv-retransmission-battle-tv-stations-go-dark-1236931598/">Deadline</a> and <a href="https://www.tvtechnology.com/business/scripps-directv-end-blackout-ink-new-retrans-deal">TV Tech</a> on the Scripps–DirecTV blackout.</li>
+    <li><a href="https://www.hollywoodreporter.com/tv/tv-news/nbc-wins-2025-26-season-viewers-first-time-since-2002-1236601890/">The Hollywood Reporter</a> and <a href="https://www.mediapost.com/publications/article/415252/nbc-leads-prime-time-viewing-with-sports-heavy-con.html">MediaPost</a> on 2025–26 season ratings; <a href="https://en.wikipedia.org/wiki/American_Idol_(season_5)">American Idol season 5</a> for the 2006 comparison.</li>
+    <li><a href="https://www.spglobal.com/market-intelligence/en/news-insights/research/2026/04/broadcast-political-ad-revenue-set-to-exceed-4-billion-in-2026">S&amp;P Global</a>, <a href="https://www.tvtechnology.com/insights/analysis/bia-political-spending-lifts-2026-local-ad-market-to-usd186-1-billion">BIA via TV Tech</a> and <a href="https://adimpact.com/blogs/maximizing-tv-ad-spending-2026-midterms">AdImpact</a> on 2026 political advertising.</li>
+    <li><a href="https://www.tvtechnology.com/news/s-and-p-predicts-modest-declines-in-retrans-ad-revenue-for-local-tv-stations">S&amp;P Global Ratings via TV Tech</a> on the station-group outlook; <a href="https://www.nfl.com/news/nfl-completes-long-term-media-distribution-agreements-through-2033-season">NFL</a> on the 2023–33 media agreements.</li>
+    <li>Market capitalisation, revenue and net income from <a href="https://stockanalysis.com/stocks/nxst/">stockanalysis.com</a>, close of 18 September 2026. Station counts from FCC Broadcast Station Totals, 30 June 2026.</li>
+  </ol>
+  <p class="card-note" style="max-width:68ch">Figures marked as projections are the source's projections, not ours. Where a number comes from a company's own reporting it reflects that company's segment definitions, which are not comparable across companies.</p>
+</section>
+
+<footer class="page-foot">
+  <p>Part of <a href="../../">Sparky</a> — a collection of small tools and interactive projects. Source on <a href="https://github.com/vanpelt/sparky">GitHub</a>.</p>
+</footer>
+
+</main>
+
+<script>
+(() => {
+'use strict';
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const S = {
+  s1: css('--series-1'), s2: css('--series-2'), s3: css('--series-3'),
+  s4: css('--series-4'), s5: css('--series-5'),
+  surface: css('--surface'), muted: css('--muted'), grid: css('--grid'),
+  baseline: css('--baseline'), bright: css('--text-bright'),
+};
+
+function el(tag, attrs = {}, kids = []) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v !== null && v !== undefined) n.setAttribute(k, v);
+  for (const c of [].concat(kids)) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+  return n;
+}
+function txt(tag, attrs, s) { const n = el(tag, attrs); n.textContent = s; return n; }
+
+/* Rounded-end bar: 4px radius on the data end, square at the baseline. */
+function barPath(x, y, w, h, r, dir) {
+  r = Math.max(0, Math.min(r, dir === 'up' ? w / 2 : h / 2, dir === 'up' ? h : w));
+  if (h <= 0 || w <= 0) return '';
+  if (dir === 'up') { // grows upward from baseline at y+h
+    return `M${x},${y + h} L${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} Z`;
+  }
+  // grows rightward from baseline at x
+  return `M${x},${y} L${x + w - r},${y} Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h - r} Q${x + w},${y + h} ${x + w - r},${y + h} L${x},${y + h} Z`;
+}
+
+/* ── Tooltip attached to a chart shell ─────────────────────────────── */
+function makeTip(shell) {
+  const tip = document.createElement('div');
+  tip.className = 'tip';
+  shell.appendChild(tip);
+  return {
+    show(html, x, y) { tip.innerHTML = html; tip.classList.add('on'); tip.style.left = x + 'px'; tip.style.top = (y - 10) + 'px'; },
+    hide() { tip.classList.remove('on'); },
+  };
+}
+const tipRow = (color, label, value) =>
+  `<span class="tip-row"><span class="tip-dot" style="background:${color}"></span>${label}<span class="tip-val">${value}</span></span>`;
+
+/* ── Legend ────────────────────────────────────────────────────────── */
+function legend(shell, items, asLine) {
+  const box = document.createElement('div');
+  box.className = 'legend';
+  for (const it of items) {
+    const w = document.createElement('span');
+    w.className = 'legend-item';
+    w.innerHTML = `<span class="legend-swatch${asLine ? ' line-swatch' : ''}" style="background:${it.color}"></span>${it.label}`;
+    box.appendChild(w);
+  }
+  shell.parentNode.insertBefore(box, shell);
+}
+
+/* ── Table view twin ───────────────────────────────────────────────── */
+function buildTable(mountId, headers, rows) {
+  const mount = document.getElementById(mountId);
+  if (!mount) return;
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  headers.forEach(h => { const th = document.createElement('th'); th.scope = 'col'; th.textContent = h; hr.appendChild(th); });
+  thead.appendChild(hr); t.appendChild(thead);
+  const tb = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    r.forEach((c, i) => {
+      const cell = document.createElement(i === 0 ? 'th' : 'td');
+      if (i === 0) cell.scope = 'row';
+      cell.textContent = c;
+      tr.appendChild(cell);
+    });
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb); mount.appendChild(t);
+}
+
+document.querySelectorAll('.table-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = document.getElementById(btn.dataset.table);
+    const on = target.classList.toggle('on');
+    btn.setAttribute('aria-pressed', String(on));
+    btn.textContent = on ? 'Chart' : 'Table';
+  });
+});
+
+/* ════════════════════════════════════════════════════════════════════
+   CHART 1 — Retransmission revenue over time (line, one series)
+   ════════════════════════════════════════════════════════════════════ */
+const RETRANS = [
+  { y: 2006, v: 0.2146 }, { y: 2010, v: 1.26 }, { y: 2015, v: 6.52 },
+  { y: 2019, v: 11.53 }, { y: 2021, v: 14.08 },
+  { y: 2022, v: 14.46, p: 1 }, { y: 2025, v: 15.58, p: 1 }, { y: 2027, v: 15.93, p: 1 },
+];
+const fmtB = v => v < 1 ? `$${Math.round(v * 1000)}M` : `$${v.toFixed(2).replace(/\.?0+$/, '')}B`;
+
+function drawRetrans() {
+  const shell = document.getElementById('chart-retrans');
+  if (!shell) return;
+  const W = 700, H = 320, M = { t: 24, r: 20, b: 42, l: 46 };
+  const pw = W - M.l - M.r, ph = H - M.t - M.b;
+  const x = yr => M.l + ((yr - 2006) / (2027 - 2006)) * pw;
+  const y = v => M.t + ph - (v / 16) * ph;
+
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Line chart: US local TV station retransmission fee revenue rising from $215 million in 2006 to $14.1 billion in 2021, then flattening through projected 2027.' });
+
+  // projection region — a wash, labelled, never a dashed line
+  svg.appendChild(el('rect', { x: x(2021), y: M.t, width: x(2027) - x(2021), height: ph, fill: S.s1, opacity: 0.045 }));
+  svg.appendChild(txt('text', { x: x(2021) + 7, y: M.t + ph - 9, class: 'band-label' }, 'Kagan projection'));
+
+  // horizontal gridlines
+  for (let v = 0; v <= 16; v += 4) {
+    svg.appendChild(el('line', { x1: M.l, x2: W - M.r, y1: y(v), y2: y(v), class: v === 0 ? 'axis-line' : 'grid-line' }));
+    svg.appendChild(txt('text', { x: M.l - 8, y: y(v) + 3.5, class: 'tick-label', 'text-anchor': 'end' }, `$${v}B`));
+  }
+  for (const yr of [2006, 2010, 2015, 2019, 2021, 2027]) {
+    svg.appendChild(txt('text', { x: x(yr), y: H - M.b + 18, class: 'tick-label', 'text-anchor': 'middle' }, String(yr)));
+  }
+
+  const d = RETRANS.map((p, i) => `${i ? 'L' : 'M'}${x(p.y)},${y(p.v)}`).join(' ');
+  svg.appendChild(el('path', { d: `${d} L${x(2027)},${y(0)} L${x(2006)},${y(0)} Z`, fill: S.s1, opacity: 0.10 }));
+  svg.appendChild(el('path', { d, fill: 'none', stroke: S.s1, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+
+  RETRANS.forEach(p => {
+    svg.appendChild(el('circle', { cx: x(p.y), cy: y(p.v), r: 4.5, fill: S.s1, stroke: S.surface, 'stroke-width': 2 }));
+  });
+
+  // selective direct labels — the two endpoints of the real growth story
+  svg.appendChild(txt('text', { x: x(2006) + 10, y: y(0.2146) - 10, class: 'direct-label' }, '$215M'));
+  svg.appendChild(txt('text', { x: x(2021) - 8, y: y(14.08) - 12, class: 'direct-label', 'text-anchor': 'end' }, '$14.1B'));
+
+  // hover layer
+  const tip = makeTip(shell);
+  const cross = el('line', { y1: M.t, y2: M.t + ph, stroke: S.baseline, 'stroke-width': 1, opacity: 0 });
+  svg.appendChild(cross);
+  const hit = el('rect', { x: M.l, y: M.t, width: pw, height: ph, class: 'hit' });
+  svg.appendChild(hit);
+
+  const move = ev => {
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) / r.width * W;
+    let best = RETRANS[0], bd = Infinity;
+    for (const p of RETRANS) { const dd = Math.abs(x(p.y) - px); if (dd < bd) { bd = dd; best = p; } }
+    cross.setAttribute('x1', x(best.y)); cross.setAttribute('x2', x(best.y)); cross.setAttribute('opacity', 1);
+    tip.show(`<span class="tip-title">${best.y}${best.p ? ' · projected' : ''}</span>${tipRow(S.s1, 'Retrans revenue', fmtB(best.v))}`,
+      x(best.y) / W * r.width, y(best.v) / H * r.height);
+  };
+  hit.addEventListener('pointermove', move);
+  hit.addEventListener('pointerleave', () => { cross.setAttribute('opacity', 0); tip.hide(); });
+
+  shell.appendChild(svg);
+  buildTable('tbl-retrans', ['Year', 'Retrans revenue', 'Basis'],
+    RETRANS.map(p => [String(p.y), fmtB(p.v), p.p ? 'Projected' : 'Reported']));
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   CHART 2 — 18–49 primetime rating (horizontal bars, one series)
+   ════════════════════════════════════════════════════════════════════ */
+const DEMO = [
+  { k: 'NBC', v: 1.01, n: '1.37M' }, { k: 'Fox', v: 0.64, n: '871K' },
+  { k: 'ABC', v: 0.57, n: '776K' }, { k: 'CBS', v: 0.45, n: '613K' },
+];
+
+function drawDemo() {
+  const shell = document.getElementById('chart-demo');
+  if (!shell) return;
+  const W = 700, rowH = 46, M = { t: 10, r: 34, b: 52, l: 58 };
+  const H = M.t + DEMO.length * rowH + M.b;
+  const pw = W - M.l - M.r;
+  const max = 1.2;
+  const x = v => (v / max) * pw;
+
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Bar chart of 2025–26 primetime ratings among adults 18–49: NBC 1.01, Fox 0.64, ABC 0.57, CBS 0.45.' });
+
+  for (let v = 0; v <= 1.2; v += 0.3) {
+    svg.appendChild(el('line', { x1: M.l + x(v), x2: M.l + x(v), y1: M.t, y2: M.t + DEMO.length * rowH, class: v === 0 ? 'axis-line' : 'grid-line' }));
+    svg.appendChild(txt('text', { x: M.l + x(v), y: H - M.b + 20, class: 'tick-label', 'text-anchor': 'middle' }, v.toFixed(1)));
+  }
+  svg.appendChild(txt('text', { x: M.l, y: H - M.b + 36, class: 'axis-title' }, 'rating points among adults 18–49'));
+
+  const tip = makeTip(shell);
+  DEMO.forEach((d, i) => {
+    const bh = 22, yTop = M.t + i * rowH + (rowH - bh) / 2;
+    svg.appendChild(txt('text', { x: M.l - 10, y: yTop + bh / 2 + 4, class: 'tick-label', 'text-anchor': 'end' }, d.k));
+    svg.appendChild(el('path', { d: barPath(M.l, yTop, x(d.v), bh, 4, 'right'), fill: S.s1 }));
+    svg.appendChild(txt('text', { x: M.l + x(d.v) + 10, y: yTop + bh / 2 + 4.5, class: 'direct-label' }, d.v.toFixed(2)));
+    const hit = el('rect', { x: M.l, y: M.t + i * rowH, width: pw, height: rowH, class: 'hit' });
+    hit.addEventListener('pointerenter', () => {
+      const r = svg.getBoundingClientRect();
+      tip.show(`<span class="tip-title">${d.k} · 2025–26 primetime</span>${tipRow(S.s1, 'Rating 18–49', d.v.toFixed(2))}${tipRow(S.s1, 'Viewers in demo', d.n)}`,
+        (M.l + x(d.v)) / W * r.width, (yTop) / H * r.height);
+    });
+    hit.addEventListener('pointerleave', () => tip.hide());
+    svg.appendChild(hit);
+  });
+
+  shell.appendChild(svg);
+  buildTable('tbl-demo', ['Network', 'Rating, adults 18–49', 'Viewers in demo'],
+    DEMO.map(d => [d.k, d.v.toFixed(2), d.n]));
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Grouped bar helper — two series, one axis, vertical or horizontal
+   ════════════════════════════════════════════════════════════════════ */
+function groupedBars(cfg) {
+  const shell = document.getElementById(cfg.mount);
+  if (!shell) return;
+  legend(shell, cfg.series.map(s => ({ color: s.color, label: s.label })));
+
+  const horiz = cfg.horizontal;
+  const W = horiz ? 700 : 520;
+  const M = horiz ? { t: 8, r: 84, b: 54, l: 84 } : { t: 34, r: 24, b: 56, l: 54 };
+  const bandSize = horiz ? 76 : 0;
+  const H = horiz ? M.t + cfg.groups.length * bandSize + M.b : 300;
+  const pw = W - M.l - M.r, ph = H - M.t - M.b;
+  const max = cfg.max;
+  const scale = v => (v / max) * (horiz ? pw : ph);
+
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': cfg.alt });
+  if (!horiz) svg.setAttribute('style', `max-width:${W}px;margin:0 auto`);
+  const tip = makeTip(shell);
+  const nS = cfg.series.length;
+  const BAR = horiz ? 20 : 22, GAP = 2;   // ≤24px marks, 2px surface gap between neighbours
+
+  // gridlines + value axis
+  for (let i = 0; i <= cfg.ticks; i++) {
+    const v = (max / cfg.ticks) * i;
+    if (horiz) {
+      const gx = M.l + scale(v);
+      svg.appendChild(el('line', { x1: gx, x2: gx, y1: M.t, y2: M.t + cfg.groups.length * bandSize, class: v === 0 ? 'axis-line' : 'grid-line' }));
+      svg.appendChild(txt('text', { x: gx, y: H - M.b + 20, class: 'tick-label', 'text-anchor': 'middle' }, cfg.fmtTick(v)));
+    } else {
+      const gy = M.t + ph - scale(v);
+      svg.appendChild(el('line', { x1: M.l, x2: W - M.r, y1: gy, y2: gy, class: v === 0 ? 'axis-line' : 'grid-line' }));
+      svg.appendChild(txt('text', { x: M.l - 8, y: gy + 3.5, class: 'tick-label', 'text-anchor': 'end' }, cfg.fmtTick(v)));
+    }
+  }
+
+  cfg.groups.forEach((g, gi) => {
+    const stackH = nS * BAR + (nS - 1) * GAP;
+    if (horiz) {
+      const top = M.t + gi * bandSize + (bandSize - stackH) / 2;
+      svg.appendChild(txt('text', { x: M.l - 10, y: top + stackH / 2 + 4, class: 'tick-label', 'text-anchor': 'end' }, g.label));
+      cfg.series.forEach((s, si) => {
+        const v = g.values[si], yTop = top + si * (BAR + GAP);
+        svg.appendChild(el('path', { d: barPath(M.l, yTop, Math.max(scale(v), 1.5), BAR, 4, 'right'), fill: s.color }));
+        svg.appendChild(txt('text', { x: M.l + scale(v) + 9, y: yTop + BAR / 2 + 4, class: 'direct-label soft' }, cfg.fmtVal(v)));
+      });
+      const hit = el('rect', { x: M.l, y: M.t + gi * bandSize, width: pw, height: bandSize, class: 'hit' });
+      hit.addEventListener('pointerenter', () => {
+        const r = svg.getBoundingClientRect();
+        tip.show(`<span class="tip-title">${g.label}${g.note ? ' · ' + g.note : ''}</span>` +
+          cfg.series.map((s, si) => tipRow(s.color, s.label, cfg.fmtVal(g.values[si]))).join(''),
+          (M.l + pw / 2) / W * r.width, (M.t + gi * bandSize + 10) / H * r.height);
+      });
+      hit.addEventListener('pointerleave', () => tip.hide());
+      svg.appendChild(hit);
+    } else {
+      const band = pw / cfg.groups.length;
+      const stackW = nS * BAR + (nS - 1) * GAP;
+      const left = M.l + gi * band + (band - stackW) / 2;
+      const heights = g.values.map(scale);
+      cfg.series.forEach((s, si) => {
+        const v = g.values[si], h = heights[si], xL = left + si * (BAR + GAP);
+        svg.appendChild(el('path', { d: barPath(xL, M.t + ph - h, BAR, h, 4, 'up'), fill: s.color }));
+        // a short bar's label would sit on top of its taller neighbour — push it clear
+        const shadowed = heights.some((o, oi) => oi !== si && o - h > 30);
+        svg.appendChild(txt('text', shadowed
+          ? { x: xL + BAR + 6, y: M.t + ph - h - 7, class: 'direct-label soft', 'text-anchor': 'start' }
+          : { x: xL + BAR / 2, y: M.t + ph - h - 8, class: 'direct-label soft', 'text-anchor': 'middle' },
+          cfg.fmtVal(v)));
+      });
+      svg.appendChild(txt('text', { x: left + stackW / 2, y: H - M.b + 20, class: 'tick-label', 'text-anchor': 'middle' }, g.label));
+      if (g.note) svg.appendChild(txt('text', { x: left + stackW / 2, y: H - M.b + 36, class: 'band-label', 'text-anchor': 'middle' }, g.note));
+      const hit = el('rect', { x: M.l + gi * band, y: M.t, width: band, height: ph, class: 'hit' });
+      hit.addEventListener('pointerenter', () => {
+        const r = svg.getBoundingClientRect();
+        tip.show(`<span class="tip-title">${g.label}</span>` +
+          cfg.series.map((s, si) => tipRow(s.color, s.label, cfg.fmtVal(g.values[si]))).join('') +
+          (g.note ? tipRow(S.muted, 'Margin', g.note) : ''),
+          (left + stackW / 2) / W * r.width, (M.t + ph - scale(Math.max(...g.values)) - 14) / H * r.height);
+      });
+      hit.addEventListener('pointerleave', () => tip.hide());
+      svg.appendChild(hit);
+    }
+  });
+
+  if (cfg.axisTitle) {
+    svg.appendChild(txt('text', horiz ? { x: M.l, y: H - M.b + 36, class: 'axis-title' } : { x: M.l - 40, y: 14, class: 'axis-title' }, cfg.axisTitle));
+  }
+  shell.appendChild(svg);
+}
+
+/* ── Chart 3 — Fox by segment ──────────────────────────────────────── */
+const FOX = [
+  { label: 'Television', values: [7.184, 0.733], note: '10.2% margin' },
+  { label: 'Cable Network Programming', values: [5.678, 2.371], note: '41.8% margin' },
+];
+
+/* ── Chart 4 — station groups ──────────────────────────────────────── */
+const GROUPS = [
+  { label: 'Nexstar', values: [5.88, 4.82] },
+  { label: 'Sinclair', values: [3.26, 0.95] },
+  { label: 'Gray Media', values: [3.15, 0.44] },
+  { label: 'Scripps', values: [2.09, 0.28] },
+];
+
+/* ════════════════════════════════════════════════════════════════════
+   BAND MAP
+   ════════════════════════════════════════════════════════════════════ */
+const BANDS = [
+  { name: 'VHF low', hz: '54–88 MHz', chans: [2, 3, 4, 5, 6] },
+  { name: 'VHF high', hz: '174–216 MHz', chans: [7, 8, 9, 10, 11, 12, 13] },
+  { name: 'UHF — what is left', hz: '470–608 MHz', chans: Array.from({ length: 23 }, (_, i) => i + 14) },
+  { name: 'Sold off', hz: '608 MHz and up', chans: [37, 38, 44, 51, 60, 69, 83] },
+];
+
+function chanFreq(n) {
+  if (n <= 4) return 54 + (n - 2) * 6;
+  if (n <= 6) return 76 + (n - 5) * 6;
+  if (n <= 13) return 174 + (n - 7) * 6;
+  return 470 + (n - 14) * 6;
+}
+const CHAN_NOTES = {
+  2: 'The bottom of the band. Long wavelengths, enormous antennas — and prone to impulse noise from car ignitions and electric motors, which is why so few stations wanted VHF-low after the digital transition.',
+  6: 'The famous one: channel 6 audio sits at 87.75 MHz, just below the FM dial, so for decades you could hear it at the far left of a car radio. A handful of low-power stations built entire radio businesses on the quirk.',
+  13: 'The top of VHF. Above here the band jumps to UHF and the physics change: shorter range, smaller antennas, far more channels.',
+  14: 'The bottom of UHF and the start of the modern band. Nearly every full-power station in the country now lives between here and channel 36.',
+  36: 'The top of the television band as of 2020. Everything above this was repacked out and sold.',
+  37: 'Never used for television, anywhere, ever. Reserved in 1963 for radio astronomy and wireless medical telemetry, and still protected.',
+  38: 'Part of the 600 MHz block bought back from broadcasters in the 2017 incentive auction. It is T-Mobile spectrum now.',
+  44: 'Sold in the 2017 incentive auction. The stations that were here either took the money and went dark, or were repacked down into the surviving UHF band.',
+  51: 'The old top of the 600 MHz block. Everything from 38 to 51 left television in the 2017 repack.',
+  60: 'Part of the 700 MHz band auctioned in 2008 after the analogue shutdown — now the backbone of LTE, and of FirstNet.',
+  69: 'The last channel of the 700 MHz band, gone in 2008.',
+  83: 'Channels 70–83 were reallocated to cellular telephony in 1983. The television band has been shrinking for forty years.',
+};
+const GONE = new Set([38, 44, 51, 60, 69, 83]);
+
+function buildBandmap() {
+  const mount = document.getElementById('bandmap');
+  const readout = document.getElementById('chan-readout');
+  if (!mount) return;
+  const buttons = [];
+
+  BANDS.forEach(b => {
+    const row = document.createElement('div');
+    row.className = 'band-row';
+    row.innerHTML = `<div class="band-row-head"><span>${b.name}</span><span class="hz">${b.hz}</span></div>`;
+    const strip = document.createElement('div');
+    strip.className = 'chan-strip';
+    b.chans.forEach(c => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'chan' + (GONE.has(c) ? ' gone' : c === 37 ? ' reserved' : '');
+      btn.textContent = c;
+      btn.setAttribute('aria-pressed', 'false');
+      btn.addEventListener('click', () => select(c, btn));
+      strip.appendChild(btn);
+      buttons.push(btn);
+    });
+    row.appendChild(strip);
+    mount.appendChild(row);
+  });
+
+  function select(c, btn) {
+    buttons.forEach(b => b.setAttribute('aria-pressed', 'false'));
+    if (btn) btn.setAttribute('aria-pressed', 'true');
+    const lo = chanFreq(c), hi = lo + 6;
+    const status = GONE.has(c) ? 'Auctioned away — no longer television'
+      : c === 37 ? 'Reserved — never television'
+      : 'In service';
+    readout.innerHTML =
+      `<div class="ro-chan">Channel ${c}</div>` +
+      `<div class="ro-hz">${lo}–${hi} MHz · ${status}</div>` +
+      `<div class="ro-note">${CHAN_NOTES[c] || `A standard 6 MHz television channel. Any station assigned here transmits between ${lo} and ${hi} MHz — and the number viewers see on screen is probably something else entirely.`}</div>`;
+  }
+  select(14, buttons.find(b => b.textContent === '14'));
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   MULTIPLEX BUDGET — 19.39 Mbps, and what you spend it on
+   ════════════════════════════════════════════════════════════════════ */
+const PIPE = 19.39;
+const MAIN_OPTIONS = [
+  { id: 'hd1080', label: '1080i HD', rate: 13.0 },
+  { id: 'hd720', label: '720p HD', rate: 11.5 },
+  { id: 'sd', label: '480i SD', rate: 3.2 },
+];
+const SUB_OPTIONS = [
+  { id: 's2', label: '.2 classic TV (SD)', rate: 2.8 },
+  { id: 's3', label: '.3 weather radar (SD)', rate: 2.2 },
+  { id: 's4', label: '.4 shopping (SD)', rate: 2.0 },
+  { id: 's5', label: '.5 diginet (720p)', rate: 5.5 },
+];
+const muxState = { main: 'hd1080', subs: new Set(['s2']) };
+
+function renderMux() {
+  const bar = document.getElementById('mux-bar');
+  const verdict = document.getElementById('mux-verdict');
+  if (!bar) return;
+
+  const main = MAIN_OPTIONS.find(m => m.id === muxState.main);
+  const subs = SUB_OPTIONS.filter(s => muxState.subs.has(s.id));
+  const subTotal = subs.reduce((a, s) => a + s.rate, 0);
+  const mainActual = Math.max(0, Math.min(main.rate, PIPE - subTotal));
+  const free = Math.max(0, PIPE - subTotal - mainActual);
+
+  bar.innerHTML = '';
+  const seg = (cls, rate, label) => {
+    const d = document.createElement('div');
+    d.className = 'mux-seg ' + cls;
+    d.style.flex = `${rate} 1 0`;
+    d.textContent = rate >= 1.8 ? label : '';
+    d.title = `${label} — ${rate.toFixed(1)} Mbps`;
+    return d;
+  };
+  bar.appendChild(seg('main', mainActual, `${main.label} · ${mainActual.toFixed(1)}`));
+  subs.forEach(s => bar.appendChild(seg('sub', s.rate, `${s.label.slice(0, 2)} · ${s.rate.toFixed(1)}`)));
+  if (free > 0.05) bar.appendChild(seg('free', free, `unused · ${free.toFixed(1)}`));
+
+  let cls, icon, msg;
+  if (main.id === 'sd') {
+    cls = 'warning'; icon = '!';
+    msg = `An SD main feed is a choice almost no network affiliate makes any more — but it frees ${(PIPE - subTotal - mainActual).toFixed(1)} Mbps for subchannels, which is exactly the business model of the diginet operators who lease that capacity.`;
+  } else if (mainActual >= main.rate - 0.05) {
+    cls = 'good'; icon = '✓';
+    msg = `The main feed gets its full ${main.rate.toFixed(1)} Mbps. Clean HD, and ${free.toFixed(1)} Mbps still unspent.`;
+  } else if (mainActual >= 9) {
+    cls = 'warning'; icon = '!';
+    msg = `The main feed is squeezed to ${mainActual.toFixed(1)} Mbps. Fine on a talk show; you will see it soften on crowd shots, confetti and grass.`;
+  } else {
+    cls = 'critical'; icon = '×';
+    msg = `The main feed is down to ${mainActual.toFixed(1)} Mbps. This is where viewers start complaining about blockiness during football — and where the station's answer is that the subchannels pay the bills.`;
+  }
+  verdict.className = 'verdict ' + cls;
+  verdict.innerHTML = `<span class="v-icon">${icon}</span><span>${msg}</span>`;
+}
+
+function buildMux() {
+  const mainBox = document.getElementById('mux-main');
+  const subBox = document.getElementById('mux-subs');
+  if (!mainBox) return;
+
+  MAIN_OPTIONS.forEach(m => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip main-chip';
+    b.textContent = m.label;
+    b.setAttribute('aria-pressed', String(muxState.main === m.id));
+    b.addEventListener('click', () => {
+      muxState.main = m.id;
+      mainBox.querySelectorAll('.chip').forEach(o => o.setAttribute('aria-pressed', 'false'));
+      b.setAttribute('aria-pressed', 'true');
+      renderMux();
+    });
+    mainBox.appendChild(b);
+  });
+
+  SUB_OPTIONS.forEach(s => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip';
+    b.textContent = `+ ${s.label}`;
+    b.setAttribute('aria-pressed', String(muxState.subs.has(s.id)));
+    b.addEventListener('click', () => {
+      muxState.subs.has(s.id) ? muxState.subs.delete(s.id) : muxState.subs.add(s.id);
+      b.setAttribute('aria-pressed', String(muxState.subs.has(s.id)));
+      renderMux();
+    });
+    subBox.appendChild(b);
+  });
+  renderMux();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   MONEY FLOW — the arrow that flips
+   ════════════════════════════════════════════════════════════════════ */
+const NODES = {
+  natAd:   { x: 30,  y: 16,  w: 190, h: 40, label: 'National advertisers', sub: 'buying reach' },
+  locAd:   { x: 480, y: 16,  w: 190, h: 40, label: 'Local advertisers', sub: 'car dealers, campaigns' },
+  network: { x: 30,  y: 104, w: 190, h: 66, label: 'THE NETWORK', sub: 'ABC · CBS · NBC · Fox' },
+  station: { x: 480, y: 104, w: 190, h: 66, label: 'THE LOCAL STATION', sub: 'the FCC licence + the tower' },
+  apps:    { x: 30,  y: 248, w: 190, h: 46, label: 'The network’s own app', sub: 'Peacock · Paramount+ · Fox One' },
+  dist:    { x: 255, y: 248, w: 190, h: 46, label: 'Cable · satellite · YouTube TV', sub: 'the bundle' },
+  ant:     { x: 480, y: 248, w: 190, h: 46, label: 'An antenna', sub: 'free, always has been' },
+};
+
+const ERAS = {
+  2005: {
+    note: 'In 2005 the flow ran outward from the network. Cable systems carried local stations because they had to or because it was traded for something else — cash barely entered it — and the networks still paid affiliates, in cash or in kind, to clear their schedule.',
+    money: { dir: 'right', label: 'network compensation', color: S.s4, strong: false },
+    retrans: { label: 'carriage, but almost no cash', color: S.muted, strong: false },
+    apps: false,
+  },
+  2026: {
+    note: 'Today the same diagram runs the other way. The station collects retransmission fees from the bundle, then hands more than half of it back to the network as reverse compensation — while the network sells the same programming straight to the viewer through its own app.',
+    money: { dir: 'left', label: 'reverse compensation', color: S.s2, strong: true },
+    retrans: { label: 'retransmission fees', color: S.s3, strong: true },
+    apps: true,
+  },
+};
+
+function drawFlow(era) {
+  const svg = document.getElementById('flow-svg');
+  const noteBox = document.getElementById('flow-note');
+  if (!svg) return;
+  const cfg = ERAS[era];
+  svg.innerHTML = '';
+  svg.setAttribute('aria-label', `Money-flow diagram for ${era}. ${cfg.note}`);
+
+  const defs = el('defs');
+  [['ah-muted', S.muted], ['ah-s2', S.s2], ['ah-s3', S.s3], ['ah-s4', S.s4], ['ah-s1', S.s1], ['ah-s5', S.s5]].forEach(([id, c]) => {
+    const m = el('marker', { id, viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
+    m.appendChild(el('path', { d: 'M0,1 L9,5 L0,9 z', fill: c }));
+    defs.appendChild(m);
+  });
+  svg.appendChild(defs);
+
+  const arrow = (d, color, markerId, label, lx, ly, anchor, strong) => {
+    svg.appendChild(el('path', {
+      d, fill: 'none', stroke: color, 'stroke-width': strong ? 2.5 : 1.5,
+      'marker-end': `url(#${markerId})`, opacity: strong ? 1 : 0.65, class: 'flow-arrow',
+    }));
+    if (label) {
+      const t = txt('text', { x: lx, y: ly, class: 'flow-money', 'text-anchor': anchor || 'middle', fill: strong ? color : S.muted }, label);
+      svg.appendChild(t);
+    }
+  };
+
+  const node = (k, accent) => {
+    const n = NODES[k];
+    const g = el('g', { class: 'flow-node' });
+    g.appendChild(el('rect', {
+      x: n.x, y: n.y, width: n.w, height: n.h, rx: 8,
+      fill: accent ? 'rgba(57,135,229,0.10)' : css('--surface-2'),
+      stroke: accent ? S.s1 : css('--border-bright'), 'stroke-width': 1,
+    }));
+    g.appendChild(txt('text', { x: n.x + n.w / 2, y: n.y + (n.sub ? n.h / 2 - 2 : n.h / 2 + 4), class: 'flow-label', 'text-anchor': 'middle' }, n.label));
+    if (n.sub) g.appendChild(txt('text', { x: n.x + n.w / 2, y: n.y + n.h / 2 + 13, class: 'flow-sub', 'text-anchor': 'middle' }, n.sub));
+    svg.appendChild(g);
+  };
+
+  // --- nodes
+  node('natAd'); node('locAd');
+  node('network', true); node('station', true);
+  node('dist'); node('ant');
+  if (cfg.apps) node('apps');
+
+  // --- advertising, unchanged in both eras
+  arrow('M125,58 L125,100', S.s1, 'ah-s1', 'national ad $', 133, 84, 'start', true);
+  arrow('M575,58 L575,100', S.s1, 'ah-s1', 'local ad $', 567, 84, 'end', true);
+
+  // --- programming always flows network → station
+  arrow('M222,124 L476,124', S.muted, 'ah-muted', 'programming', 349, 117, 'middle', false);
+
+  // --- the money arrow that flips
+  const m = cfg.money;
+  if (m.dir === 'right') {
+    arrow('M222,154 L476,154', m.color, 'ah-s4', m.label, 349, 172, 'middle', m.strong);
+  } else {
+    arrow('M478,154 L224,154', m.color, 'ah-s2', m.label, 349, 172, 'middle', m.strong);
+  }
+
+  // --- distributor → station (retrans)
+  const r = cfg.retrans;
+  arrow('M430,248 C470,228 500,206 543,176', r.color, r.strong ? 'ah-s3' : 'ah-muted', r.label, 424, 226, 'end', r.strong);
+
+  // --- station → antenna, free over the air
+  arrow('M575,172 L575,244', S.muted, 'ah-muted', 'free, over the air', 583, 212, 'start', false);
+
+  // --- 2026 only: the network goes around its own affiliate
+  if (cfg.apps) {
+    arrow('M125,172 L125,244', S.s5, 'ah-s5', 'direct to consumer', 133, 212, 'start', true);
+  }
+
+  noteBox.textContent = cfg.note;
+}
+
+function buildFlowToggle() {
+  const btns = document.querySelectorAll('.flow-toggle button');
+  btns.forEach(b => b.addEventListener('click', () => {
+    btns.forEach(o => o.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', 'true');
+    drawFlow(b.dataset.era);
+  }));
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════════ */
+drawRetrans();
+drawDemo();
+
+groupedBars({
+  mount: 'chart-fox',
+  horizontal: false,
+  groups: FOX,
+  series: [{ label: 'Revenue', color: S.s1 }, { label: 'Segment EBITDA', color: S.s2 }],
+  max: 8, ticks: 4,
+  fmtTick: v => `$${v}B`,
+  fmtVal: v => `$${v.toFixed(2)}B`,
+  axisTitle: '$ billions',
+  alt: 'Grouped bar chart. Fox Television segment: $7.18 billion revenue, $0.73 billion EBITDA. Cable Network Programming: $5.68 billion revenue, $2.37 billion EBITDA.',
+});
+buildTable('tbl-fox', ['Segment', 'Revenue', 'Segment EBITDA', 'Margin'], [
+  ['Television', '$7.184B', '$0.733B', '10.2%'],
+  ['Cable Network Programming', '$5.678B', '$2.371B', '41.8%'],
+]);
+
+groupedBars({
+  mount: 'chart-groups',
+  horizontal: true,
+  groups: GROUPS,
+  series: [{ label: 'Revenue (TTM)', color: S.s1 }, { label: 'Market capitalisation', color: S.s2 }],
+  max: 6, ticks: 3,
+  fmtTick: v => `$${v}B`,
+  fmtVal: v => `$${v.toFixed(2)}B`,
+  axisTitle: '$ billions · 18 September 2026',
+  alt: 'Grouped bar chart comparing annual revenue with market capitalisation for four station groups. Every group is worth far less than one year of its own revenue.',
+});
+buildTable('tbl-groups', ['Group', 'Revenue (TTM)', 'Market cap', 'Cap as % of revenue'], [
+  ['Nexstar', '$5.88B', '$4.82B', '82%'],
+  ['Sinclair', '$3.26B', '$0.95B', '29%'],
+  ['Gray Media', '$3.15B', '$0.44B', '14%'],
+  ['Scripps', '$2.09B', '$0.28B', '13%'],
+]);
+
+buildBandmap();
+buildMux();
+buildFlowToggle();
+drawFlow('2026');
+
+})();
+</script>
+</body>
+</html>

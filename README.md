@@ -6,6 +6,7 @@ A repository of experiments for the OpenClaw instance running on a DGX Spark. It
 
 | Tool | Description |
 |------|-------------|
+| [dial](tools/dial/) | How broadcast television works, and what the networks and their local affiliates are worth now &mdash; the 6 MHz channel, the money flow, and twenty years of retransmission fees. |
 | [futr](tools/futr/) | Password-encrypt a static HTML page so it can be hosted publicly but read only by people with the key. |
 | [klozar](tools/klozar/) | Turn a week of Clozemaster practice into a Serbian lesson sheet, weighted by what actually went wrong. |
 | [slovo](tools/slovo/) | An interactive history of the Slavic languages: a phylogenetic tree, the dispersal of 500–800 CE, and cognates you can watch mutate. |
