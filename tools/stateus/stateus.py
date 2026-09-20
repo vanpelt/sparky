@@ -583,8 +583,8 @@ def classify(obs: list[Obs], region) -> dict:
     Presence outranks absence: one coordinate inside the region settles the day,
     because day-count rules ask whether any part of it was spent there. The one
     exception is a map viewport, which is discarded when a device-located source
-    puts the user somewhere else the same day — searching Maps from a laptop in
-    California happily reports a map still centred on Brooklyn.
+    puts the user somewhere else the same day — searching Maps from a laptop two
+    time zones away happily reports a map still centred on home.
     """
     by_day: dict[date, list[Obs]] = {}
     for o in obs:

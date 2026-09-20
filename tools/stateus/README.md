@@ -47,9 +47,9 @@ existed, rather than assumed to be good:
 
 **A validation window can lie to you.** Maps coordinates scored 100% precision
 against Timeline, so they were trusted. Airline records later showed nine days
-where Maps placed the user in Brooklyn while photographs and clocks placed them
-in California, Iowa and Michigan — a Maps search run from a laptop reports the
-map's centre, which defaults to home. The validation window missed this entirely
+where Maps placed the user at home while photographs and clocks placed them in
+three other states — a Maps search run from a laptop reports the map's centre,
+which defaults to home. The validation window missed this entirely
 because it covered a stretch spent mostly *in* New York, where a home-centred
 guess is right by accident. Measure a source over a period where it has room to
 be wrong.
@@ -74,8 +74,8 @@ date boundary — which is the whole ballgame for a day count.
 
 **A journey's endpoints belong to their own days.** A Timeline segment carries a
 start and an end. Spreading both coordinates across every day it spans puts the
-traveller at the destination before they arrive; an overnight flight then
-credits a day in New York that was spent in Nashville.
+traveller at the destination before they arrive; a return flight then credits a
+day at home that was actually spent away.
 
 **Other people's photos.** A photo library is not a location log. Pictures
 arrive by AirDrop, text and shared album carrying someone else's EXIF
