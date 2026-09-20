@@ -251,23 +251,30 @@ def _geo(value):
 
 
 def _segment_points(seg):
-    """Every coordinate a Timeline segment places you at."""
+    """Coordinates in a segment, each tagged with the day(s) it belongs to.
+
+    A visit is stationary, so its location holds for every day the segment
+    covers. A journey is not: its endpoints belong to the day it left and the
+    day it arrived, and crediting both ends to both days would place the
+    traveller at the destination before they got there.
+    """
     pts = []
     visit = seg.get("visit", {}).get("topCandidate", {})
     g = _geo(visit.get("placeLocation"))
     if g:
-        pts.append((g, visit.get("semanticType", "visit")))
+        pts.append((g, visit.get("semanticType", "visit"), "span"))
 
     act = seg.get("activity", {})
-    for end in ("start", "end"):
+    kind = act.get("topCandidate", {}).get("type", "activity")
+    for end, anchor in (("start", "start"), ("end", "end")):
         g = _geo(act.get(end))
         if g:
-            pts.append((g, act.get("topCandidate", {}).get("type", "activity")))
+            pts.append((g, kind, anchor))
 
     for step in seg.get("timelinePath", []) or []:
         g = _geo(step.get("point"))
         if g:
-            pts.append((g, "path"))
+            pts.append((g, "path", "span"))
     return pts
 
 
@@ -316,12 +323,16 @@ def source_timeline(path: Path, year: int, max_span_days: int = 7) -> list[Obs]:
         if (d1 - d0).days > max_span_days:  # a gap in the data, not a long stay
             d1 = d0
 
-        for i in range((d1 - d0).days + 1):
-            day = d0 + timedelta(days=i)
-            if day.year != year:
-                continue
-            for (lat, lng), kind in pts:
-                out.append(Obs(day, lat, lng, "timeline", kind))
+        for (lat, lng), kind, anchor in pts:
+            if anchor == "start":
+                days = [d0]
+            elif anchor == "end":
+                days = [d1]
+            else:
+                days = [d0 + timedelta(days=i) for i in range((d1 - d0).days + 1)]
+            for day in days:
+                if day.year == year:
+                    out.append(Obs(day, lat, lng, "timeline", kind))
     return out
 
 
@@ -452,61 +463,137 @@ def source_git_tz(roots, year: int, emails=("vanpelt",)) -> dict:
 
 
 def apply_tz_evidence(ledger: dict, tz_by_day: dict) -> dict:
-    """Upgrade unresolved days that show a New York clock.
+    """Settle days using the clock the user's devices were set to.
 
-    This is weaker than a coordinate: an Eastern offset is consistent with
-    NYC but also with Boston or Florida. Measured against Timeline ground
-    truth it ran ~93% precise, so it is recorded under its own basis and kept
-    separate from the observed floor rather than folded into it.
+    Weaker than a coordinate: an Eastern offset is consistent with New York but
+    also with Boston or Miami, so it gets its own basis and is reported apart
+    from the observed floor. It does two jobs here — it settles days that have
+    no evidence at all, and it overrules a lone map viewport, which is a guess
+    about location that a clock reading can contradict outright.
+
+    A day showing two different inhabited zones is travel or ambiguity, not
+    corroboration, so it settles nothing. UTC is ignored throughout: it means a
+    build server, not a user standing on the Greenwich meridian.
     """
     for day, entry in ledger.items():
-        if entry["basis"] != "no evidence":
-            continue  # a real coordinate always outranks a clock reading
-        offsets = tz_by_day.get(day)
+        if entry["basis"] not in ("no evidence", "viewport"):
+            continue
+        offsets = {o for o in tz_by_day.get(day, ()) if o != 0}
         if not offsets:
             continue
-        if eastern_offset(day) in offsets:
+        east = eastern_offset(day)
+        if east in offsets and len(offsets) == 1:
             ledger[day] = {"status": "NYC", "basis": "tz-corroborated",
-                           "evidence": "New York clock offset, no contrary GPS",
-                           "sources": "timezone", "points": []}
-        else:
+                           "evidence": "New York clock, nothing contradicting it",
+                           "sources": "timezone", "points": entry["points"]}
+        elif east not in offsets:
+            note = ("map centre overruled by a non-Eastern clock"
+                    if entry["basis"] == "viewport" else
+                    f"non-Eastern clock {sorted(o // 3600 for o in offsets)}")
             ledger[day] = {"status": "AWAY", "basis": "tz-corroborated",
-                           "evidence": f"non-Eastern clock offset {sorted(offsets)}",
-                           "sources": "timezone", "points": []}
+                           "evidence": note, "sources": "timezone",
+                           "points": entry["points"]}
+        elif entry["basis"] == "viewport":
+            # Eastern plus another zone: too ambiguous to keep a viewport guess.
+            ledger[day] = {"status": "AWAY", "basis": "tz-corroborated",
+                           "evidence": "map centre, clock ambiguous across zones",
+                           "sources": "timezone", "points": entry["points"]}
     return ledger
+
+
+# Airports whose terminals sit inside a state, so a boarding record is proof of
+# presence there. Newark is deliberately absent: it is in New Jersey, and
+# flying out of it says nothing about having been in New York that day.
+AIRPORTS = {
+    "JFK": (40.6413, -73.7781), "LGA": (40.7769, -73.8740),
+    "EWR": (40.6895, -74.1745), "SFO": (37.6213, -122.3790),
+    "BOS": (42.3656, -71.0096), "MIA": (25.7959, -80.2870),
+    "MSP": (44.8848, -93.2223), "BNA": (36.1263, -86.6774),
+    "HND": (35.5494, 139.7798), "SLC": (40.7899, -111.9791),
+    "LAS": (36.0840, -115.1537), "ICT": (37.6499, -97.4331),
+    "DFW": (32.8998, -97.0403),
+}
+
+
+def source_flights(path: Path, year: int) -> list[Obs]:
+    """Flown segments from airline records.
+
+    The strongest evidence in the stack: a third party recorded it at the time,
+    which is the kind of document a day-count audit actually wants. A leg
+    contributes a fix at each end, and the geometry decides what that means —
+    departing LaGuardia lands inside New York, departing Newark does not.
+    """
+    if not path.exists():
+        return []
+    import csv as _csv
+
+    out = []
+    with open(path) as f:
+        for row in _csv.DictReader(f):
+            try:
+                day = date.fromisoformat(row["date"])
+            except (ValueError, KeyError):
+                continue
+            if day.year != year:
+                continue
+            if (row.get("status") or "flown").strip().lower() != "flown":
+                continue  # a booking that was cancelled is not evidence of anything
+            for code in (row.get("from"), row.get("to")):
+                if code in AIRPORTS:
+                    lat, lng = AIRPORTS[code]
+                    out.append(Obs(day, lat, lng, "flight",
+                                   f"{row.get('from')}>{row.get('to')} {row.get('conf','')}".strip()))
+    return out
 
 
 # ---------------------------------------------------------------- ledger
 
 
-def classify(obs: list[Obs], in_nyc) -> list[dict]:
-    """Group observations into one verdict per day."""
+# A coordinate from a phone's GPS says where the device physically was. A
+# coordinate lifted from a Maps search URL only says where the *map* was
+# centred, which defaults to the last place viewed — usually home. Treat the
+# two as different grades of evidence.
+DEVICE_LOCATED = ("flight", "photo", "timeline")
+
+
+def classify(obs: list[Obs], region) -> dict:
+    """Group observations into one verdict per day.
+
+    Presence outranks absence: one coordinate inside the region settles the day,
+    because day-count rules ask whether any part of it was spent there. The one
+    exception is a map viewport, which is discarded when a device-located source
+    puts the user somewhere else the same day — searching Maps from a laptop in
+    California happily reports a map still centred on Brooklyn.
+    """
     by_day: dict[date, list[Obs]] = {}
     for o in obs:
         by_day.setdefault(o.day, []).append(o)
 
     days = {}
     for day, items in by_day.items():
-        nyc, away = [], []
+        inside, outside = [], []
         for o in items:
-            (nyc if in_nyc.contains(Point(o.lng, o.lat)) else away).append(o)
-        sources = sorted({o.source for o in items})
-        if nyc:
-            days[day] = {
-                "status": "NYC",
-                "basis": "observed",
-                "evidence": f"{len(nyc)} point(s) in NYC",
-                "sources": ",".join(sources),
-                "points": items,
-            }
+            (inside if region.contains(Point(o.lng, o.lat)) else outside).append(o)
+
+        dev_in = [o for o in inside if o.source in DEVICE_LOCATED]
+        dev_out = [o for o in outside if o.source in DEVICE_LOCATED]
+        sources = ",".join(sorted({o.source for o in items}))
+
+        if dev_in:
+            days[day] = {"status": "NYC", "basis": "observed",
+                         "evidence": f"{len(dev_in)} device fix(es) inside",
+                         "sources": sources, "points": items}
+        elif inside and not dev_out:
+            days[day] = {"status": "NYC", "basis": "viewport",
+                         "evidence": f"{len(inside)} map centre(s), uncontradicted",
+                         "sources": sources, "points": items}
         else:
-            days[day] = {
-                "status": "AWAY",
-                "basis": "observed",
-                "evidence": f"{len(away)} point(s), none in NYC",
-                "sources": ",".join(sources),
-                "points": items,
-            }
+            why = (f"{len(dev_out)} device fix(es) elsewhere"
+                   if dev_out else f"{len(outside)} point(s), none inside")
+            if inside and dev_out:
+                why += f"; {len(inside)} map centre(s) discarded as contradicted"
+            days[day] = {"status": "AWAY", "basis": "observed",
+                         "evidence": why, "sources": sources, "points": items}
     return days
 
 
@@ -535,7 +622,7 @@ def fill_gaps(ledger: dict, start: date, end: date, max_gap: int) -> dict:
         ledger.setdefault(d, {"status": "UNKNOWN", "basis": "no evidence",
                               "evidence": "", "sources": "", "points": []})
 
-    observed = [d for d in all_days if ledger[d]["basis"] in ("observed", "tz-corroborated")]
+    observed = [d for d in all_days if ledger[d]["basis"] in ("observed", "viewport", "tz-corroborated")]
     for prev, nxt in zip(observed, observed[1:]):
         gap = (nxt - prev).days - 1
         if gap <= 0 or gap > max_gap:
@@ -566,6 +653,8 @@ def main():
                    help="Apple Photos library sqlite (default: your local library)")
     p.add_argument("--takeout", type=Path, action="append", default=[],
                    help="Google Takeout directory; repeatable")
+    p.add_argument("--flights", type=Path, action="append", default=[],
+                   help="CSV of flown segments: date,from,to,conf,source")
     p.add_argument("--timeline", type=Path, action="append", default=[],
                    help="Google Maps Timeline JSON exported from your phone; repeatable")
     p.add_argument("--no-photos", action="store_true")
@@ -585,6 +674,10 @@ def main():
     if not args.no_photos:
         got = source_photos(args.photos, args.year, args.device or None)
         print(f"  photos    {len(got):>6} observations")
+        obs += got
+    for fl in args.flights:
+        got = source_flights(fl, args.year)
+        print(f"  flights   {len(got):>6} observations  ({fl.name})")
         obs += got
     for tl in args.timeline:
         got = source_timeline(tl, args.year)
@@ -626,6 +719,7 @@ def main():
                    and (basis is None or ledger[d]["basis"] == basis))
 
     nyc_obs_wd = count(weekdays, "NYC", "observed")
+    nyc_vp_wd = count(weekdays, "NYC", "viewport")
     nyc_tz_wd = count(weekdays, "NYC", "tz-corroborated")
     nyc_inf_wd = count(weekdays, "NYC", "inferred")
     unknown_wd = count(weekdays, "UNKNOWN")
@@ -634,10 +728,11 @@ def main():
     print(f"  NYC weekday count — {args.year} through {end}")
     print(f"{'='*62}")
     print(f"  Observed in NYC          {nyc_obs_wd:>4}   <- defensible floor")
+    print(f"  Map-centre only          {nyc_vp_wd:>4}   (uncontradicted viewport)")
     print(f"  Timezone-corroborated    {nyc_tz_wd:>4}   (NY clock, ~93% precise)")
     print(f"  Inferred in NYC          {nyc_inf_wd:>4}   (between two NYC days)")
     print(f"  {'-'*46}")
-    print(f"  Best estimate            {nyc_obs_wd + nyc_tz_wd + nyc_inf_wd:>4}")
+    print(f"  Best estimate            {nyc_obs_wd + nyc_vp_wd + nyc_tz_wd + nyc_inf_wd:>4}")
     print(f"  Unresolved weekdays      {unknown_wd:>4}   <- review these")
     print(f"{'='*62}")
     print(f"  Weekdays elapsed         {len(weekdays):>4}")

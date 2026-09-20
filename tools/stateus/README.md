@@ -21,10 +21,14 @@ reports days it cannot resolve instead of guessing at them.
 - **Google Maps Timeline** (`--timeline FILE.json`) — exported from the phone,
   not Takeout. The highest-fidelity source, but only covers the period since
   Timeline was switched on.
+- **Airline records** (`--flights CSV`) — flown segments as
+  `date,from,to,conf,source,status`. The strongest source in the stack: a third
+  party recorded it at the time. Legs marked anything but `flown` are ignored,
+  because a cancelled booking is not evidence of anything.
 - **Google Takeout** (`--takeout DIR`) — the Timeline folder in a Takeout is
   empty by design, but `My Activity/Maps` records the map centre of every
-  Maps search, which is a genuine position fix. Also reads `Records.json`,
-  `semanticSegments` and Photos metadata where present.
+  Maps search. Treat this as weaker than a device fix (see below). Also reads
+  `Records.json`, `semanticSegments` and Photos metadata where present.
 - **Timezone corroboration** — non-geotagged photos (screenshots included)
   and the user's own git commits both record a UTC offset, which pins the
   zone even when nothing records coordinates. Disable with `--no-tz`.
@@ -37,9 +41,22 @@ existed, rather than assumed to be good:
 | source | precision on NYC | recall |
 |---|---|---|
 | Apple Photos alone | 100% | 49% |
-| Maps activity coordinates | 100% | 66% |
+| Maps activity coordinates | see below | 66% |
 | Timezone (git + screenshots) | 93% | 95% |
-| **all of the above combined** | **100%** | **93%** |
+| **all sources combined** | **100%** | **94%** |
+
+**A validation window can lie to you.** Maps coordinates scored 100% precision
+against Timeline, so they were trusted. Airline records later showed nine days
+where Maps placed the user in Brooklyn while photographs and clocks placed them
+in California, Iowa and Michigan — a Maps search run from a laptop reports the
+map's centre, which defaults to home. The validation window missed this entirely
+because it covered a stretch spent mostly *in* New York, where a home-centred
+guess is right by accident. Measure a source over a period where it has room to
+be wrong.
+
+So a map centre is no longer allowed to establish presence on its own: a
+device-located fix elsewhere on the same day discards it, and a clock in another
+zone overrules it.
 
 Two findings worth keeping: Takeout renders every timestamp in the account's
 *current* display timezone, so the `EDT`/`PDT` label on an activity entry says
@@ -54,6 +71,11 @@ been merged.
 **Local days, not UTC days.** A photo taken at 04:02 UTC in California is the
 previous evening locally. Counting the UTC day silently shifts it across a
 date boundary — which is the whole ballgame for a day count.
+
+**A journey's endpoints belong to their own days.** A Timeline segment carries a
+start and an end. Spreading both coordinates across every day it spans puts the
+traveller at the destination before they arrive; an overnight flight then
+credits a day in New York that was spent in Nashville.
 
 **Other people's photos.** A photo library is not a location log. Pictures
 arrive by AirDrop, text and shared album carrying someone else's EXIF
