@@ -242,14 +242,31 @@ page keeps showing something; it is safe to blank once every client has reloaded
 ### Two people editing at once
 
 The tutor and I are both in the sheet during the hour, so the question isn't
-whether edits collide but what happens when they do. Two things stop one person
-erasing the other:
+whether edits collide but what happens when they do.
 
-**Text is published on a pause in typing, not on leaving the field.** Blur-only
+**A field has one typist at a time.** Merging after the fact always felt clunky
+— text jumped, lines reordered, the caret moved — so the first keystroke in a
+note or the pad now claims a lease on it (the `presence` table). Everyone else
+sees "<name> is typing…" above the field, it goes read-only (and a
+`beforeinput` guard rejects text that skips `readOnly`), and the typist's words
+stream in. The lease lapses 5 s after the last keystroke or the moment the typist
+leaves the field — released only after their last write lands, so the next
+person never starts from a copy missing the final words. The name comes from
+the "Your name" box, kept in `localStorage` under `klozar:name`.
+
+Lease time is the *server's* clock, compared only on the server and handed back
+as milliseconds remaining, so browser clock skew never matters. A 2 s "pulse"
+(one statement: live leases joined to the text they cover) drives both the
+indicator and the streaming; the 15 s full poll still runs underneath, and a
+lease vanishing triggers one immediately to pick up the holder's final write.
+The lease is advisory — two first keystrokes inside one round trip can both
+land — and everything below is what settles that race.
+
+**Text is published while you type, not on leaving the field.** Blur-only
 saving meant your work sat in your browser for as long as you kept the cursor
 there, and whoever left their field last overwrote the other outright. A write
-now goes out ~800 ms after you stop typing, so the window in which two people can
-diverge is about a second instead of a whole train of thought.
+now goes out every ~600 ms while typing (a throttle, not a debounce, so a
+watcher sees words arrive rather than a paragraph after you stop).
 
 **Every write is a compare-and-swap on `rev`.** The upsert carries a
 `where rev = <the revision this browser last read>`, so a write that would land
@@ -284,7 +301,7 @@ Two rules keep the ancestor honest, which is what the merge depends on:
   been superseded, and the next keystroke then merges your note against a stale
   copy of itself. Anything older than the revision already held is dropped.
 - **A poll never touches a key that is mid-edit.** Not just one with a request in
-  flight — one with the 800 ms debounce still pending, too. The store hasn't been
+  flight — one with the ~600 ms write timer still pending, too. The store hasn't been
   told yet, so everything it says about that key predates what is on screen.
 
 Incoming text is applied into a field you are *typing in*, with the caret mapped
@@ -328,7 +345,7 @@ Two details worth keeping if you touch the sync code:
   new revision, and every reconcile after it merged against a blank base. That
   is the state in which two appends look like two different edits.
 
-Polling is every 15s and only while the tab is visible.
+Polling is every 15s (the pulse every 2s), and only while the tab is visible.
 
 ### On a schedule
 

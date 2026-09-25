@@ -208,6 +208,26 @@ textarea {
   border: 1px solid var(--rule); border-left: 3px solid var(--done); border-radius: 3px;
 }
 textarea::placeholder { color: var(--faint); font-style: italic; }
+/* Someone else holds this field: it is theirs until they pause. */
+textarea[readonly] { border-left-color: var(--star); background: var(--paper); cursor: default; }
+.typing {
+  display: flex; align-items: center; gap: .45rem; margin: 0 0 .35rem;
+  font-family: var(--mono); font-size: .72rem; color: var(--star);
+}
+.typing[hidden] { display: none; }
+.typing::before {
+  content: ""; width: .45rem; height: .45rem; border-radius: 50%;
+  background: var(--star); animation: typing 1s ease-in-out infinite;
+}
+@keyframes typing { 50% { opacity: .25; } }
+.pad .typing { margin: .8rem 0 0; }
+.pad .typing + textarea { margin-top: .35rem; }
+.who {
+  font-family: var(--slab); font-size: .78rem; color: var(--ink);
+  background: var(--raised); border: 1px solid var(--rule); border-radius: 3px;
+  padding: .4rem .6rem; width: 8.5rem;
+}
+.who::placeholder { color: var(--faint); }
 
 .legend {
   display: flex; align-items: center; gap: .45rem; margin: .9rem 0 0;
@@ -275,6 +295,8 @@ footer {
     <button id="starred-only" type="button" aria-pressed="false">★ Starred only</button>
     <button id="toggle-en" type="button" aria-pressed="false">Hide English</button>
     <button id="clear-covered" type="button">Reset ticks</button>
+    <input id="who" class="who" type="text" maxlength="24" autocomplete="off"
+      placeholder="Your name" aria-label="Your name, shown while you type">
     <span class="saving" id="saving"></span>
   </div>
 
@@ -287,6 +309,7 @@ footer {
     <h2>Lesson notes</h2>
     <p class="blurb">Anything that doesn’t belong to one sentence — homework, a rule
       that finally landed, what to ask next week.</p>
+    <p class="typing" id="pad-typing" hidden></p>
     <textarea id="week-note" aria-label="Notes for this week"
       placeholder="Notes for the week…"></textarea>
   </section>
@@ -434,13 +457,125 @@ footer {
     }
   }
 
-  // One write per thought was right when only one person typed. With two, text
-  // that lives only in your browser until you leave the field is text the other
-  // person is about to overwrite, so a pause in typing is enough to publish.
+  // Text streams out while it is being typed rather than on a pause: whoever is
+  // watching should see words arrive, not a paragraph after the typist stops.
+  // A throttle, not a debounce — the timer is not reset by the next keystroke,
+  // so steady typing still publishes every STREAM_MS. Holding the field's lease
+  // is what makes this safe; the merge underneath is only for a lost race.
+  var STREAM_MS = 600;
   function nudge(id) {
     saveLocal();
-    if (timers[id]) clearTimeout(timers[id]);
-    timers[id] = setTimeout(function () { delete timers[id]; push(id); }, 800);
+    claim(id);
+    if (timers[id]) return;
+    timers[id] = setTimeout(function () { delete timers[id]; push(id); }, STREAM_MS);
+  }
+
+  // --- who is typing where ------------------------------------------------
+  //
+  // Merging two people's edits after the fact was always going to feel clunky:
+  // text jumps, lines reorder, and the caret moves under you. So a field now has
+  // an owner while someone types in it. The first keystroke claims a short lease
+  // on the server; everyone else sees "<name> is typing…" and the field goes
+  // read-only until the lease lapses — LEASE_MS after the last keystroke — or the
+  // typist leaves it. It is advisory: two first keystrokes inside one round trip
+  // can both land, and then the merge below settles it exactly as before.
+  //
+  // Lease time is the server's clock, compared on the server, and handed back as
+  // "milliseconds left" — so neither browser's clock ever has to agree with the
+  // other's, which is the skew trap an updated_at guard fell into.
+  var LEASE_MS = 5000, RENEW_MS = 2000, PULSE_MS = 2000;
+  var ME = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  var NAME_KEY = "klozar:name";
+  var myName = "";
+  try { myName = localStorage.getItem(NAME_KEY) || ""; } catch (e) {}
+  var held = {}, leases = {};
+  var padTyping = document.getElementById("pad-typing");
+
+  // The pad is one row per week, but a note is one row forever, so the pad's
+  // lease names its week or two weeks' pads would lock each other.
+  function leaseKey(key) { return key === WEEK_KEY ? "w:" + sheet.week : key; }
+
+  function claim(key) {
+    if (!sync || !sync.claim || cellOf(key).kind === "tick") return;
+    var h = held[key], now = performance.now();
+    if (h && (h.pending || h.at + RENEW_MS > now)) return;
+    var mine = { at: now, pending: true };
+    held[key] = mine;
+    sync.claim(leaseKey(key), ME, myName, LEASE_MS).then(function (res) {
+      if (held[key] !== mine) return;
+      mine.pending = false;
+      if (res.mine) { delete leases[key]; return; }
+      // Lost the race to someone who started first: theirs until they pause.
+      delete held[key];
+      leases[key] = { name: res.name, until: performance.now() + res.left };
+      showLocks();
+    }).catch(function () { if (held[key] === mine) delete held[key]; });
+  }
+
+  // Let go once the last write has landed, not before: releasing first would
+  // let the other person start typing over a version missing our last words.
+  // A claim made after this was scheduled replaces `held[key]`, so a quick
+  // leave-and-come-back does not drop the lease it just renewed.
+  function release(key) {
+    var h = held[key];
+    if (!h || !sync || !sync.release) return;
+    Promise.resolve(inflight[key]).then(function () {
+      if (held[key] !== h || timers[key]) return;
+      delete held[key];
+      sync.release(leaseKey(key), ME);
+    });
+  }
+
+  // readOnly alone is not enough: text inserted programmatically — dictation,
+  // an IME commit, some automation — can skip it and land in a held field,
+  // which is exactly the two-writer case the lease exists to prevent.
+  function guard(ta, key) {
+    ta.addEventListener("beforeinput", function (e) {
+      if (lockedBy(key)) e.preventDefault();
+    });
+  }
+
+  function lockedBy(key) {
+    var l = leases[key];
+    return l && l.until > performance.now() ? l : null;
+  }
+
+  function paintLock(ta, label, l) {
+    ta.readOnly = !!l;
+    label.hidden = !l;
+    if (l) label.textContent = (l.name || "Someone") + " is typing…";
+  }
+
+  function showLocks() {
+    var rows = document.querySelectorAll(".row[data-id]");
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i], l = lockedBy(noteKey(row.dataset.id));
+      paintLock(row.querySelector("textarea"), row.querySelector(".typing"), l);
+      // Open the panel so the watcher sees the words arrive.
+      if (l) row.querySelector(".note").hidden = false;
+    }
+    paintLock(padEl, padTyping, lockedBy(WEEK_KEY));
+  }
+
+  // What the pulse said: who holds what, and the text of whatever they hold.
+  // Returns true when a lease vanished, because the holder's last words were
+  // written just before letting go and no pulse carries a field nobody holds.
+  function absorbLeases(rows) {
+    var next = {}, got = { notes: [] }, padKey = "w:" + sheet.week, vanished = false;
+    rows.forEach(function (r) {
+      if (r.client === ME) return;
+      var key = r.key === padKey ? WEEK_KEY : r.key;
+      if (key !== WEEK_KEY && key.indexOf("n:") !== 0) return;   // another week's pad
+      next[key] = { name: r.name, until: performance.now() + r.left };
+      if (r.rev == null) return;                     // claimed, nothing written yet
+      if (key === WEEK_KEY) got.pad = { note: r.note, covered: false, rev: r.rev };
+      else got.notes.push({ id: key.slice(2), note: r.note, rev: r.rev });
+    });
+    for (var k in leases) if (!next[k]) vanished = true;
+    leases = next;
+    absorb(got);
+    showLocks();
+    return vanished;
   }
 
   function flush(id) {
@@ -847,6 +982,7 @@ footer {
             (e.note ? "note" : "+ note") + "</button>" +
         "</div>" +
         '<div class="note"' + (e.note ? "" : " hidden") + '>' +
+          '<p class="typing" hidden></p>' +
           '<textarea placeholder="What came up in the lesson…">' + esc(e.note) + "</textarea>" +
         "</div>" +
       "</div>";
@@ -878,6 +1014,7 @@ footer {
     // The buffer and `state` stay identical keystroke by keystroke, so a remote
     // edit arriving mid-word merges against what is actually on screen. Only
     // the network write waits for a pause.
+    guard(ta, noteKey(s.id));
     ta.addEventListener("input", function () {
       entry(s.id).note = ta.value;
       reflect(s.id);
@@ -886,10 +1023,12 @@ footer {
 
     ta.addEventListener("blur", function () {
       var v = ta.value.trim();
-      if (v === entry(s.id).note && !timers[noteKey(s.id)]) return;
-      entry(s.id).note = v;
-      reflect(s.id);
-      flush(noteKey(s.id));
+      if (v !== entry(s.id).note || timers[noteKey(s.id)]) {
+        entry(s.id).note = v;
+        reflect(s.id);
+        flush(noteKey(s.id));
+      }
+      release(noteKey(s.id));
     });
 
     row.dataset.id = s.id;
@@ -987,9 +1126,14 @@ footer {
     var T = function (v) { return { type: "text", value: String(v) }; };
     var I = function (v) { return { type: "integer", value: String(v) }; };
 
-    function pipeline(stmts) {
+    // Milliseconds since the epoch on the server's clock. julianday() rather than
+    // unixepoch('subsec') because it is in every SQLite, old ones included.
+    var NOW = "cast((julianday('now') - 2440587.5) * 86400000 as integer)";
+
+    function pipeline(stmts, keepalive) {
       return fetch(cfg.url + "/v2/pipeline", {
         method: "POST",
+        keepalive: !!keepalive,
         headers: {
           "Authorization": "Bearer " + cfg.token,
           "Content-Type": "application/json"
@@ -1062,6 +1206,50 @@ footer {
             covered: row ? row[1].value === "1" : false,
             rev: rev
           } };
+        });
+      },
+      // Take the lease if it is free, lapsed, or already ours; the read-back says
+      // who holds it either way. Leases from closed tabs are swept on the way.
+      claim: function (key, client, name, ms) {
+        return pipeline([
+          { sql: "insert into presence(key, client, name, until) values(?,?,?," + NOW + " + ?) " +
+                 "on conflict(key) do update set client=excluded.client, " +
+                 "name=excluded.name, until=excluded.until " +
+                 "where presence.client = excluded.client or presence.until <= " + NOW,
+            args: [T(key), T(client), T(name), I(ms)] },
+          { sql: "select client, name, until - " + NOW + " from presence where key = ?",
+            args: [T(key)] },
+          { sql: "delete from presence where until < " + NOW + " - 3600000", args: [] }
+        ]).then(function (results) {
+          var row = results[1].response.result.rows[0];
+          if (!row) return { mine: false, name: "", left: 0 };
+          return { mine: row[0].value === client, name: row[1].value,
+                   left: Number(row[2].value) };
+        });
+      },
+      release: function (key, client) {
+        return pipeline([{ sql: "delete from presence where key = ? and client = ?",
+                           args: [T(key), T(client)] }], true)
+          .catch(function () { /* it lapses on its own */ });
+      },
+      // Every live lease, with the text of the field it covers. One statement,
+      // so watching someone type costs one small read every PULSE_MS rather
+      // than re-reading every note on the sheet.
+      pulse: function () {
+        return pipeline([{
+          sql: "select p.key, p.client, p.name, p.until - " + NOW + ", " +
+               "coalesce(sn.note, wn.note), coalesce(sn.rev, wn.rev) from presence p " +
+               "left join sentence_notes sn on p.key = 'n:' || sn.sentence_id " +
+               "left join week_notes wn on p.key = 'w:' || wn.week " +
+               "where p.until > " + NOW,
+          args: []
+        }]).then(function (results) {
+          return results[0].response.result.rows.map(function (row) {
+            return { key: row[0].value, client: row[1].value, name: row[2].value,
+                     left: Number(row[3].value),
+                     note: row[4].type === "null" ? "" : row[4].value,
+                     rev: row[5].type === "null" ? null : Number(row[5].value) };
+          });
         });
       },
       // Everything the page needs in one pipeline: this week's ticks, the notes
@@ -1186,6 +1374,20 @@ footer {
       document.addEventListener("visibilitychange", function () {
         if (!document.hidden) fetchNotes();
       });
+      // The fast loop: who is typing, and what they have typed so far. One
+      // pulse at a time — a slow answer is not stacked under the next one.
+      var pulsing = false;
+      setInterval(function () {
+        if (!sync || document.hidden || pulsing) return;
+        pulsing = true;
+        sync.pulse()
+          .then(function (rows) { if (absorbLeases(rows)) fetchNotes(); })
+          .catch(function () { /* the slow loop still runs */ })
+          .then(function () { pulsing = false; });
+      }, PULSE_MS);
+      // A lease runs out on the watcher's screen without a pulse having to say
+      // so; this unfreezes the field on time even if a pulse is slow.
+      setInterval(showLocks, 500);
     } else if (window.claude && typeof window.claude.use === "function") {
       window.claude.use("db").then(function (ns) {
         if (!ns) return;
@@ -1293,6 +1495,7 @@ footer {
     showPad();
 
     // Same rule as a sentence note: publish on a pause, not on leaving.
+    guard(padEl, WEEK_KEY);
     padEl.addEventListener("input", function () {
       entry(WEEK_KEY).note = padEl.value;
       growPad();
@@ -1300,10 +1503,24 @@ footer {
     });
     padEl.addEventListener("blur", function () {
       var v = padEl.value.trim();
-      if (v === entry(WEEK_KEY).note && !timers[WEEK_KEY]) return;
-      entry(WEEK_KEY).note = v;
-      padEl.value = v;
-      flush(WEEK_KEY);
+      if (v !== entry(WEEK_KEY).note || timers[WEEK_KEY]) {
+        entry(WEEK_KEY).note = v;
+        padEl.value = v;
+        flush(WEEK_KEY);
+      }
+      release(WEEK_KEY);
+    });
+
+    var whoEl = document.getElementById("who");
+    whoEl.value = myName;
+    whoEl.addEventListener("input", function () {
+      myName = whoEl.value.trim();
+      try { localStorage.setItem(NAME_KEY, myName); } catch (e) {}
+    });
+    // Closing the tab mid-word should not leave the other person locked out
+    // for the rest of the lease.
+    window.addEventListener("pagehide", function () {
+      for (var k in held) if (sync && sync.release) sync.release(leaseKey(k), ME);
     });
 
     var sortPick = document.getElementById("sort-pick");
