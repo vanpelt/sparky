@@ -1,0 +1,27 @@
+{
+  "pulled": "2026-09-25",
+  "source": "analysis/effort_reports.sql (prod effort_reports, answered, W&B cohort)",
+  "window": "2026-07-10 to 2026-09-24",
+  "answers": 198,
+  "engineers": 49,
+  "response_rate_all_orgs": "213 answered / 813 prompts (532 dismissed, 68 skipped)",
+  "said_hours_total": 1613,
+  "agent_hours_total_incl_subagents": 233.6,
+  "median_said_hours": 2.0,
+  "median_agent_minutes": 29,
+  "median_ratio_said_over_agent": 5.2,
+  "pooled_ratio_said_over_agent": 6.9,
+  "p25_p75_ratio": [2.5, 10.6],
+  "pct_tasks_estimate_exceeds_agent_time": 95,
+  "median_ratio_said_over_session_open_time": 1.4,
+  "pct_tasks_estimate_exceeds_session_open_time": 57,
+  "cost_usd_list_price": 7580,
+  "ratio_buckets": {"slower": 10, "1-2x": 21, "2-5x": 68, "5-10x": 48, "10x+": 51},
+  "by_estimated_size": [
+    {"said": "<= 1 h", "n": 74, "median_agent_min": 11},
+    {"said": "1-4 h", "n": 54, "median_agent_min": 34},
+    {"said": "4-8 h", "n": 30, "median_agent_min": 87},
+    {"said": "1-3 days", "n": 25, "median_agent_min": 78},
+    {"said": "3+ days", "n": 15, "median_agent_min": 195}
+  ]
+}
