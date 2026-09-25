@@ -1,0 +1,138 @@
+{
+  "generated": "2026-09-25",
+  "since": "2026-01-01",
+  "sessions": 6768,
+  "top_level": 1933,
+  "subagents": 4835,
+  "merged_prs": 640,
+  "prs": 714,
+  "cost_usd": 33599,
+  "usd_per_merged_pr": 52.5,
+  "lines_added": 1069397,
+  "tool_calls": 346850,
+  "sessions_with_secret_scrubbed": 1080,
+  "pct_sessions_with_secret": 0.16,
+  "cache_hit": 0.969,
+  "median_open_min": 69,
+  "median_active_min": 15,
+  "subagents_per_session_by_month": [
+    {
+      "m": "Jan",
+      "subs_per_session": 2.4
+    },
+    {
+      "m": "Feb",
+      "subs_per_session": 2.0
+    },
+    {
+      "m": "Mar",
+      "subs_per_session": 1.9
+    },
+    {
+      "m": "Apr",
+      "subs_per_session": 1.4
+    },
+    {
+      "m": "May",
+      "subs_per_session": 0.8
+    },
+    {
+      "m": "Jun",
+      "subs_per_session": 1.0
+    },
+    {
+      "m": "Jul",
+      "subs_per_session": 3.8
+    },
+    {
+      "m": "Aug",
+      "subs_per_session": 2.4
+    },
+    {
+      "m": "Sep",
+      "subs_per_session": 4.8
+    }
+  ],
+  "parallel_by_month": [
+    {
+      "month": "2026-01-01",
+      "avg_live": 1.1897522522522523,
+      "peak": 7
+    },
+    {
+      "month": "2026-02-01",
+      "avg_live": 1.1168935148118495,
+      "peak": 3
+    },
+    {
+      "month": "2026-03-01",
+      "avg_live": 1.1884444444444444,
+      "peak": 3
+    },
+    {
+      "month": "2026-04-01",
+      "avg_live": 1.1808,
+      "peak": 3
+    },
+    {
+      "month": "2026-05-01",
+      "avg_live": 1.2587690271343481,
+      "peak": 5
+    },
+    {
+      "month": "2026-06-01",
+      "avg_live": 1.2672772689425478,
+      "peak": 5
+    },
+    {
+      "month": "2026-07-01",
+      "avg_live": 1.3108856088560885,
+      "peak": 6
+    },
+    {
+      "month": "2026-08-01",
+      "avg_live": 1.7240356083086052,
+      "peak": 13
+    },
+    {
+      "month": "2026-09-01",
+      "avg_live": 1.661675579322638,
+      "peak": 5
+    }
+  ],
+  "pct_working_time_2plus_agents": 0.272,
+  "pct_working_time_3plus_agents": 0.061,
+  "tool_share": [
+    {
+      "kind": "Shell",
+      "share": 0.604860890875018
+    },
+    {
+      "kind": "Read",
+      "share": 0.14648983710537697
+    },
+    {
+      "kind": "Edit",
+      "share": 0.10990918264379415
+    },
+    {
+      "kind": "Everything else",
+      "share": 0.063802796597953
+    },
+    {
+      "kind": "Search",
+      "share": 0.03901109989909183
+    },
+    {
+      "kind": "Web & browser",
+      "share": 0.020080726538849646
+    },
+    {
+      "kind": "Write",
+      "share": 0.01584546633991639
+    }
+  ],
+  "shell_share": 0.605,
+  "tool_error_rate": 0.0262,
+  "bash_error_rate": 0.0373
+}

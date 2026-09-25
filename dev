@@ -1,8 +1,17 @@
 #!/usr/bin/env -S uv run --quiet python
 import http.server, os, sys
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+
+class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    # A dev server: never let the browser reuse a stale stylesheet or script.
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+
 http.server.test(
-    HandlerClass=http.server.SimpleHTTPRequestHandler,
+    HandlerClass=NoCacheHandler,
     port=int(sys.argv[1]) if len(sys.argv) > 1 else 8000,
     bind=os.environ.get("HOST", "127.0.0.1"),
 )
