@@ -1,0 +1,24 @@
+## Headscale-only image for Cloud Run.
+## Runs headscale as the control plane; hiveqad runs separately on a Docker-capable VM.
+##
+## Uses Postgres (Cloud SQL) instead of SQLite for stateless container compatibility.
+
+FROM alpine:3.21 AS fetch-headscale
+ARG HEADSCALE_VERSION=0.28.0
+ARG TARGETARCH
+RUN apk add --no-cache curl \
+ && curl -fsSL "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_${TARGETARCH}" \
+    -o /headscale \
+ && chmod +x /headscale
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tini
+COPY --from=fetch-headscale /headscale /usr/local/bin/headscale
+COPY headscale-postgres.yaml /etc/headscale/config.yaml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Cloud Run provides PORT env var (default 8080).
+EXPOSE 8080
+
+ENTRYPOINT ["tini", "--", "/entrypoint.sh"]

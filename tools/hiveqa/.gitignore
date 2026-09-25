@@ -1,0 +1,3 @@
+# Built binaries (at repo root only, not cmd/ subdirectories)
+/hiveqad
+/hiveqactl
