@@ -1,0 +1,305 @@
+{
+  "headline": {
+    "sessions": 710603.0,
+    "engineers": 254,
+    "tool_calls": 21442150.0,
+    "merged_sessions": 24062.0,
+    "interactive_sessions": 110588.0,
+    "active_hours": 83174.13109583333,
+    "subagents": 297483.0,
+    "first_week": "2024-10-28",
+    "automation_accounts": 5,
+    "months_since_rollout": 13
+  },
+  "multi_harness": [
+    {
+      "month": "2026-08-01",
+      "users": 205,
+      "multi": 138,
+      "pct_multi": 67.3
+    },
+    {
+      "month": "2026-09-01",
+      "users": 186,
+      "multi": 112,
+      "pct_multi": 60.2
+    }
+  ],
+  "harness_share": [
+    {
+      "k": "Claude Code",
+      "start_share": 0.21847649918962722,
+      "end_share": 0.3858731196860693
+    },
+    {
+      "k": "Codex",
+      "start_share": 0.17504051863857376,
+      "end_share": 0.3751284686536485
+    },
+    {
+      "k": "Cursor",
+      "start_share": 0.5980551053484603,
+      "end_share": 0.18714379146033822
+    },
+    {
+      "k": "OpenCode & Pi",
+      "start_share": 0.002593192868719611,
+      "end_share": 0.04503410258805942
+    },
+    {
+      "k": "Other",
+      "start_share": 0.005834683954619124,
+      "end_share": 0.006820517611884519
+    }
+  ],
+  "provider_share": [
+    {
+      "k": "Anthropic",
+      "start_share": 0.6667183863460047,
+      "end_share": 0.4633107780518139
+    },
+    {
+      "k": "OpenAI",
+      "start_share": 0.1785880527540729,
+      "end_share": 0.4428634667678492
+    },
+    {
+      "k": "Unknown",
+      "start_share": 0.018153607447633825,
+      "end_share": 0.043382027445772464
+    },
+    {
+      "k": "Cursor (Auto/Composer)",
+      "start_share": 0.13467804499612102,
+      "end_share": 0.04019899239022745
+    },
+    {
+      "k": "Open weights",
+      "start_share": 0.0018619084561675718,
+      "end_share": 0.010244735344336939
+    }
+  ],
+  "subagents": {
+    "then_now": {
+      "users_active_both": 189,
+      "delegating_more": 98,
+      "delegating_less": 83,
+      "median_ratio_then": 0.41234756097560976,
+      "median_ratio_now": 0.5443037974683544
+    },
+    "by_month": [
+      {
+        "month": "2026-01-01",
+        "active_users": 103,
+        "users_with_subagents": 23,
+        "pct_users_with_subagents": 0.22330097087378642,
+        "users_with_workflows": 0,
+        "subagents_per_top_level": 0.40078243860030427,
+        "median_user_ratio": 0.0
+      },
+      {
+        "month": "2026-02-01",
+        "active_users": 122,
+        "users_with_subagents": 54,
+        "pct_users_with_subagents": 0.4426229508196721,
+        "users_with_workflows": 0,
+        "subagents_per_top_level": 0.6891352549889135,
+        "median_user_ratio": 0.0
+      },
+      {
+        "month": "2026-03-01",
+        "active_users": 152,
+        "users_with_subagents": 90,
+        "pct_users_with_subagents": 0.5921052631578947,
+        "users_with_workflows": 0,
+        "subagents_per_top_level": 1.0511275272161742,
+        "median_user_ratio": 0.12637362637362637
+      },
+      {
+        "month": "2026-04-01",
+        "active_users": 174,
+        "users_with_subagents": 108,
+        "pct_users_with_subagents": 0.6206896551724138,
+        "users_with_workflows": 0,
+        "subagents_per_top_level": 1.3665744057310323,
+        "median_user_ratio": 0.2928571428571428
+      },
+      {
+        "month": "2026-05-01",
+        "active_users": 195,
+        "users_with_subagents": 137,
+        "pct_users_with_subagents": 0.7025641025641025,
+        "users_with_workflows": 0,
+        "subagents_per_top_level": 0.8774405125076266,
+        "median_user_ratio": 0.20833333333333334
+      },
+      {
+        "month": "2026-06-01",
+        "active_users": 211,
+        "users_with_subagents": 165,
+        "pct_users_with_subagents": 0.7819905213270142,
+        "users_with_workflows": 4,
+        "subagents_per_top_level": 0.9401355814357727,
+        "median_user_ratio": 0.4375
+      },
+      {
+        "month": "2026-07-01",
+        "active_users": 213,
+        "users_with_subagents": 171,
+        "pct_users_with_subagents": 0.8028169014084507,
+        "users_with_workflows": 61,
+        "subagents_per_top_level": 0.8423772609819121,
+        "median_user_ratio": 0.3355263157894737
+      },
+      {
+        "month": "2026-08-01",
+        "active_users": 205,
+        "users_with_subagents": 172,
+        "pct_users_with_subagents": 0.8390243902439024,
+        "users_with_workflows": 102,
+        "subagents_per_top_level": 1.246139300346675,
+        "median_user_ratio": 0.39807692307692305
+      },
+      {
+        "month": "2026-09-01",
+        "active_users": 186,
+        "users_with_subagents": 151,
+        "pct_users_with_subagents": 0.8118279569892473,
+        "users_with_workflows": 90,
+        "subagents_per_top_level": 1.5075725255972696,
+        "median_user_ratio": 0.6142570281124498
+      }
+    ]
+  },
+  "length_spread": {
+    "users": 175,
+    "p10_share_over_15m": 0.23459715639810427,
+    "p50_share_over_15m": 0.4444444444444444,
+    "p90_share_over_15m": 0.6666666666666666,
+    "corr_volume_vs_long": -0.15920550234700598
+  },
+  "pr": {
+    "window": {
+      "total_cost": 943538.2188089131,
+      "merged_sessions": 8316.0,
+      "cost_in_merged_sessions": 181201.41511257915,
+      "coding_sessions_no_pr": 4606.0,
+      "open_pr_sessions": 939.0
+    },
+    "by_month": [
+      {
+        "month": "2026-01-01",
+        "interactive_sessions": 3085.0,
+        "with_pr": 152.0,
+        "merged": 142.0,
+        "still_open": 9.0,
+        "closed_unmerged": 1.0,
+        "wrote_code_no_pr_rows": 2614.0,
+        "pct_with_pr": 0.04927066450567261,
+        "merge_rate": 0.9342105263157895
+      },
+      {
+        "month": "2026-02-01",
+        "interactive_sessions": 4160.0,
+        "with_pr": 252.0,
+        "merged": 211.0,
+        "still_open": 17.0,
+        "closed_unmerged": 24.0,
+        "wrote_code_no_pr_rows": 3498.0,
+        "pct_with_pr": 0.06057692307692308,
+        "merge_rate": 0.8373015873015873
+      },
+      {
+        "month": "2026-03-01",
+        "interactive_sessions": 8928.0,
+        "with_pr": 1719.0,
+        "merged": 1202.0,
+        "still_open": 123.0,
+        "closed_unmerged": 394.0,
+        "wrote_code_no_pr_rows": 5883.0,
+        "pct_with_pr": 0.19254032258064516,
+        "merge_rate": 0.6992437463641652
+      },
+      {
+        "month": "2026-04-01",
+        "interactive_sessions": 8457.0,
+        "with_pr": 3124.0,
+        "merged": 1803.0,
+        "still_open": 60.0,
+        "closed_unmerged": 1261.0,
+        "wrote_code_no_pr_rows": 4401.0,
+        "pct_with_pr": 0.3693981317251981,
+        "merge_rate": 0.5771446862996159
+      },
+      {
+        "month": "2026-05-01",
+        "interactive_sessions": 8714.0,
+        "with_pr": 2232.0,
+        "merged": 1601.0,
+        "still_open": 115.0,
+        "closed_unmerged": 516.0,
+        "wrote_code_no_pr_rows": 4698.0,
+        "pct_with_pr": 0.2561395455588708,
+        "merge_rate": 0.7172939068100358
+      },
+      {
+        "month": "2026-06-01",
+        "interactive_sessions": 16934.0,
+        "with_pr": 5289.0,
+        "merged": 3628.0,
+        "still_open": 210.0,
+        "closed_unmerged": 1451.0,
+        "wrote_code_no_pr_rows": 7868.0,
+        "pct_with_pr": 0.3123302232195583,
+        "merge_rate": 0.6859519757988277
+      },
+      {
+        "month": "2026-07-01",
+        "interactive_sessions": 15610.0,
+        "with_pr": 4264.0,
+        "merged": 3042.0,
+        "still_open": 252.0,
+        "closed_unmerged": 970.0,
+        "wrote_code_no_pr_rows": 5145.0,
+        "pct_with_pr": 0.2731582319026265,
+        "merge_rate": 0.7134146341463414
+      },
+      {
+        "month": "2026-08-01",
+        "interactive_sessions": 14583.0,
+        "with_pr": 4559.0,
+        "merged": 3417.0,
+        "still_open": 535.0,
+        "closed_unmerged": 607.0,
+        "wrote_code_no_pr_rows": 4180.0,
+        "pct_with_pr": 0.312624288555167,
+        "merge_rate": 0.7495064707172625
+      },
+      {
+        "month": "2026-09-01",
+        "interactive_sessions": 5063.0,
+        "with_pr": 1635.0,
+        "merged": 1203.0,
+        "still_open": 261.0,
+        "closed_unmerged": 171.0,
+        "wrote_code_no_pr_rows": 1129.0,
+        "pct_with_pr": 0.3229310685364408,
+        "merge_rate": 0.7357798165137615
+      }
+    ]
+  },
+  "distribution": {
+    "sessions": {
+      "gini": 0.5509392714321905,
+      "top10_share": 0.39073917390969926
+    },
+    "active_hours": {
+      "gini": 0.6624912606538423,
+      "top10_share": 0.5095726103337876
+    },
+    "cost": {
+      "gini": 0.6886422908242495,
+      "top10_share": 0.54898102910956
+    }
+  }
+}
