@@ -64,9 +64,9 @@ def _():
     HARNESS_COLORS = ["#3987e5", "#f5a400", "#9085e9", "#199e70", "#6b6b6b"]
     PROVIDER_ORDER = ["OpenAI", "Anthropic", "Cursor (Auto/Composer)", "Open weights", "Unknown"]
     PROVIDER_COLORS = HARNESS_COLORS
-    INK, PAPER, MUTE, AMBER = "#0d0d0d", "#faf8f5", "#868686", "#f5a400"
+    INK, PAPER, MUTE, ACCENT = "#0d0d0d", "#faf8f5", "#868686", "#63a4ff"
     return (
-        AMBER,
+        ACCENT,
         HARNESS_COLORS,
         HARNESS_ORDER,
         INK,
@@ -476,7 +476,7 @@ def _(HARNESS_COLORS, HARNESS_ORDER, alt, con, filter_ready, mo):
     """).pl()
     sub_adoption_chart = (
         alt.Chart(sub_adoption)
-        .mark_line(point=True, strokeWidth=2, color="#f5a400")
+        .mark_line(point=True, strokeWidth=2, color="#63a4ff")
         .encode(
             x=alt.X("month:T", title=None),
             y=alt.Y("pct_users_with_subagents:Q", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1]), title="engineers who ran ≥ 1 subagent that month"),
@@ -833,7 +833,7 @@ def _(mo):
 
 @app.cell
 def _(
-    AMBER,
+    ACCENT,
     DECK_DIR,
     HARNESS_COLORS,
     HARNESS_ORDER,
@@ -928,7 +928,7 @@ def _(
         ),
         "subagent-adoption": _theme(
             alt.Chart(_full_months).mark_line(
-                strokeWidth=5, color=AMBER, point=alt.OverlayMarkDef(size=180, filled=True, color=AMBER, stroke=INK, strokeWidth=3)
+                strokeWidth=5, color=ACCENT, point=alt.OverlayMarkDef(size=180, filled=True, color=ACCENT, stroke=INK, strokeWidth=3)
             ).encode(
                 x=alt.X("month:T", title=None, axis=alt.Axis(format="%b", grid=False, tickCount={"interval": "month", "step": 1})),
                 y=alt.Y("pct_users_with_subagents:Q", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%", tickCount=4), title=None),

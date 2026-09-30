@@ -2,7 +2,7 @@
 
 20-minute expo-hall talk, "Agent engineering with a shared understanding of how teams build with AI". Forked from `../hivemind-overview` (same framework and tokens, new HiveMind mark). Linked from the repo-root `index.html`.
 
-Placeholders still to fill are wrapped in `<span class="tk">` (amber, dashed underline): `grep -n 'class="tk"' index.html`.
+Placeholders still to fill are wrapped in `<span class="tk">` (accent color, dashed underline): `grep -n 'class="tk"' index.html`.
 
 ## Files
 
@@ -19,9 +19,10 @@ Placeholders still to fill are wrapped in `<span class="tk">` (amber, dashed und
 
 - Slides are `<section>` elements inside `<deck-stage>`. Each slide is self-contained — its layout lives in classes on its own elements, not in shared rules. Copy a nearby slide's structure when adding a new one.
 - **Speaker notes:** `<script type="application/json" id="speaker-notes">` holds an array of strings, **one per slide, in slide order**. When you add/remove/reorder a slide, update this array in lockstep or the notes will desync.
-- Design tokens are CSS variables on `:root` (OKLCH). Reuse them — don't hardcode hex.
+- Design tokens are CSS variables on `:root`. Reuse them — don't hardcode hex.
+- Color: CoreWeave blue `--blue` (#0541e9) for the HiveMind mark and solid fills, `--blue-light` (#63a4ff) for text and strokes on dark. Use `var(--accent)` for highlights: it is light blue on `.chrome.dark`, deep blue on `.chrome.paper`, white on `.chrome.blue`. The chart generators' `ACCENT` matches `--blue-light`; the orange in the harness/provider charts is Claude Code's/Anthropic's series color, not an accent.
 - Fonts are Inter + JetBrains Mono from Google Fonts. The `.mono` class switches to JetBrains Mono.
-- Slide chrome: `.chrome.dark` and `.chrome.paper` are the two base backgrounds.
+- Slide chrome: `.chrome.dark` and `.chrome.paper` are the two base backgrounds; `.chrome.blue` is for section dividers and the survey hero.
 
 ## Previewing
 
