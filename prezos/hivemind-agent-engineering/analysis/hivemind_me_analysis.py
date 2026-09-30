@@ -34,7 +34,7 @@ DATA_DIR = Path(os.environ.get("HM_ME_DATA", "~/.hivemind/exports/me")).expandus
 DECK_DIR = Path(__file__).resolve().parent.parent
 START = "2026-01-01"
 
-INK, PAPER, MUTE, AMBER, GRAY = "#0d0d0d", "#faf8f5", "#868686", "#f5a400", "#6b6b6b"
+INK, PAPER, MUTE, ACCENT, GRAY = "#0d0d0d", "#faf8f5", "#868686", "#63a4ff", "#6b6b6b"
 
 con = duckdb.connect()
 con.execute(f"CREATE VIEW s AS SELECT * FROM '{DATA_DIR}/sessions.parquet' WHERE started_at >= '{START}'")
@@ -144,13 +144,13 @@ charts = {
         alt.Chart(fanout).mark_bar(cornerRadiusEnd=4, stroke=INK, strokeWidth=2).encode(
             x=alt.X("month:O", timeUnit="yearmonth", title=None, axis=alt.Axis(format="%b", labelAngle=0)),
             y=alt.Y("n:Q", title=None, axis=alt.Axis(tickCount=4)),
-            color=alt.Color("who:N", scale=alt.Scale(domain=who_order, range=[GRAY, AMBER]), sort=who_order),
+            color=alt.Color("who:N", scale=alt.Scale(domain=who_order, range=[GRAY, ACCENT]), sort=who_order),
             order=alt.Order("r:Q"),
         ).transform_calculate(r=f"indexof({who_order}, datum.who)")
     ),
     "me-parallel": theme(
         alt.Chart(parallel).mark_line(
-            strokeWidth=5, color=AMBER, point=alt.OverlayMarkDef(size=180, filled=True, color=AMBER, stroke=INK, strokeWidth=3)
+            strokeWidth=5, color=ACCENT, point=alt.OverlayMarkDef(size=180, filled=True, color=ACCENT, stroke=INK, strokeWidth=3)
         ).encode(
             x=alt.X("month:T", title=None, axis=alt.Axis(format="%b", grid=False, tickCount={"interval": "month", "step": 1})),
             y=alt.Y("avg_live:Q", scale=alt.Scale(domain=[1, 2]), axis=alt.Axis(tickCount=4, format=".1f"),
@@ -161,7 +161,7 @@ charts = {
         alt.Chart(tool_share).mark_bar(cornerRadiusEnd=4, height=44).encode(
             y=alt.Y("kind:N", sort=list(tool_share.filter(tool_share["kind"] != "Everything else")["kind"]) + ["Everything else"], title=None, axis=alt.Axis(labelFont="Inter", labelColor=PAPER, labelFontSize=26, labelLimit=0, domain=False, ticks=False)),
             x=alt.X("share:Q", title=None, axis=alt.Axis(format="%", tickCount=4)),
-            color=alt.condition(alt.datum.kind == "Shell", alt.value(AMBER), alt.value(GRAY)),
+            color=alt.condition(alt.datum.kind == "Shell", alt.value(ACCENT), alt.value(GRAY)),
         ),
         h=480,
     ),
