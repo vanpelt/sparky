@@ -33,7 +33,7 @@
   "Providers follow. OpenAI went from 18% to 44% of all sessions, Anthropic from 67% to 46%. The Cursor Auto bucket hides its vendor. The point for a manager: you can't pick the winner in advance, so standardize the record, not the tool.",
   "Delegation. In January 22% of engineers ran a subagent in a month; by August it was 84%. Multi-agent workflows went from 4 people to 102 in three months. Looking at the same people two months apart, more of them delegate more than less.",
   "Outcomes. About 31% of interactive sessions end in a PR and three in four of those merge. That's a lower bound: pushes to main and repos without the GitHub App never get linked. Usage is lumpy: the top 10% of engineers drive 55% of list-price spend, and how long someone's sessions run is mostly a personal habit. That's why the next part of this talk is about sharing what works.",
-  "Now zoom in on one engineer: me. This is my own HiveMind export, the same file anyone can download from settings. Since January: 640 merged PRs, about fifty dollars each at list price, a million lines added, and one session in six had a secret the daemon scrubbed before it left my laptop.",
+  "Now zoom in on one engineer: me. This is my own HiveMind export, the same file anyone can download from settings. Since January: 640 merged PRs, about fifty dollars each at list price, a million lines added. And 97% of the tokens my agents read came from the prompt cache, which is a big part of why that per-PR number is so low.",
   "The shape of my work changed. I start about the same number of sessions each month. My agents start far more: in September, 345 from me and more than 1,600 subagents. Subagents are 7 in 10 sessions but only about a fifth of the cost, because they are short and cheap.",
   "And I run more of them at once. Averaged over every five minutes where something was working, I went from 1.2 agents at a time to 1.7. More than a quarter of my working time has two or more going. The flip side: a session is open for over an hour, but the agent is only working for fifteen minutes of it. The rest of the time it's waiting on me.",
   "What do the agents actually do? Sixty percent of their tool calls are shell commands. Not fancy integrations, the terminal. That's also where most of the failures are. The lesson for anyone who builds internal tools: your CLI is now an agent interface. Good help text and predictable flags pay off twice.",
@@ -430,7 +430,7 @@
       <div class="num"><div class="v">640</div><div class="c">merged PRs, out of 714 opened</div></div>
       <div class="num"><div class="v">$53</div><div class="c">per merged PR, at list price</div></div>
       <div class="num"><div class="v">1.07M</div><div class="c">lines added by agents</div></div>
-      <div class="num"><div class="v">1 in 6</div><div class="c">sessions had a secret scrubbed on my laptop</div></div>
+      <div class="num"><div class="v">97%</div><div class="c">of input tokens served from the prompt cache</div></div>
     </div>
     <div class="reveal-3 mono" style="margin-top: auto; color: var(--mute-dark); font-size: 24px;">
       // hivemind export · Jan → Sep 2026 · 6,768 sessions · regenerate with analysis/hivemind_me_analysis.py
