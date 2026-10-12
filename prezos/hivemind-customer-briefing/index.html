@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HiveMind Overview</title>
+<meta name="description" content="A short HiveMind overview for teams evaluating it: what it captures, how it works, the trust model, and how to get started.">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+
+
+<script src="deck-stage.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script type="application/json" id="speaker-notes">
+[
+  "Thanks for making the time. You saw the Fully Connected talk; this is the short version aimed at your team, a few minutes of slides and then most of our time in the product itself. Ask questions whenever.",
+  "Every engineering leader is getting the same question: are these Anthropic and OpenAI bills worth it? Most teams can't answer, and not because the data doesn't exist. Every agent writes a full transcript to disk. It's just stranded: Claude Code, Codex, Cursor, Devin, OpenCode: five tools, five formats, one per laptop, gone when someone wipes their machine.",
+  "Who it's for: everyone shipping code with agents. ICs who want to get better and see how a teammate solved the same problem. Staff engineers who want their tricks to become team practice. And leaders who own the budget and need to know what it costs, what shipped and where work is stuck. It's a shared learning tool, not a surveillance tool, and the trust model makes that concrete.",
+  "HiveMind fixes that. A small daemon on each laptop discovers sessions from every agent, redacts secrets on-device, and ships them to one backend that normalizes everything into one schema. Engineers don't change how they work and they're free to switch agents, which they will: at W&B Cursor went from 60% of sessions to 19% this year. Standardize the record, not the tool.",
+  "Four things we capture: the transcript, every tool call, the cost, and the outcome, meaning did it turn into a merged PR. The outcome is what lets you answer the budget question. For scale, at W&B that's 711K sessions from 254 engineers since January.",
+  "The question I always get next: who can see my sessions? We didn't build a new permission system. Visibility follows GitHub: if you can read the repo, you can read the sessions tied to it. Work with no git remote is visible only to you. Secrets are scrubbed on the laptop before anything ships. And if transcripts can't leave your network at all, you can self-host the whole stack. Individuals can still mark a session private or turn sharing off per repo or per user.",
+  "Security, three independent gates. Device: the daemon's token lives in the system keychain, rotates every 24 hours, and you can revoke it instantly. Identity: SSO and SCIM from your IdP, so membership and offboarding follow your directory and there is no parallel user list. Network: no public ingress to the data plane, or run the whole thing inside your own VPC. Pull any one of those and the next request stops.",
+  "Here's what we learned running this at scale: once agents write code faster than anyone can read it, review is where the time goes. Two things help. Thumbnails: every session shows what it produced, so you can skim a week of work in seconds. And new, screencasts: the agent records a narrated demo of its change, with each step checked, so you watch the feature work before you open the diff. Fourteen checks passed here, and a person reviewed the video.",
+  "The result I want you to remember. HiveMind occasionally asks engineers one question when a task merges: how long would this have taken you without AI? 198 answers from 49 engineers. Typical answer: two hours. The agent worked 29 minutes. Five times faster, and the agent beat the estimate 95% of the time. The catch: end to end, tasks close only about 1.4 times faster, because review, testing and approval are now the bottleneck. That's where we're building next. Your team gets this same survey.",
+  "Enough slides. In the demo: the overview and live sessions; replaying a session and forking a stuck one to a different agent (troubleshoot); skills and how a teammate solved something similar (share); insights that find repeated pitfalls across people and turn them into agent rules (improve); usage, cost per merged PR, and the effort survey (measure).",
+  "Getting started is small. Pick one team for a pilot. Hosted: install the daemon, sign in with GitHub, sessions start flowing within minutes. Self-hosted: one install command and 'hivemind serve up' brings up the whole stack on your own infrastructure. Docs at hivemind.wandb.tools/docs/self-hosting.",
+  "Questions. And next steps: who should be on the pilot, hosted or self-hosted, and what you'd most want to measure."
+]
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- The HiveMind mark, defined once; every <svg class="hm-logo"> reuses this mask. -->
+<svg width="0" height="0" style="position: absolute;" aria-hidden="true">
+  <defs>
+    <mask id="hm-mask">
+      <rect width="102.179" height="102.179" rx="15.0506" fill="white" />
+      <path d="M43.7027 52.6385C46.8632 52.6385 49.4253 55.1972 49.4253 58.3536V66.9977C49.4253 70.154 46.8632 72.7128 43.7027 72.7128H40.2673L40.2839 72.7276C36.8666 72.7391 34.1058 75.5152 34.1173 78.928V84.786C34.1173 87.9423 31.5552 90.5011 28.3947 90.5011H18.4517C15.2912 90.5011 12.7292 87.9423 12.7292 84.786V74.856C12.7292 71.6996 15.2912 69.1408 18.4517 69.1408H23.1729L23.2529 69.1403C26.4082 69.1004 28.9943 66.7017 29.3247 63.6286V58.3536C29.3247 55.1972 31.8868 52.6385 35.0472 52.6385H43.7027Z" fill="black"/>
+      <path d="M67.132 52.6385C70.2925 52.6385 72.8546 55.1972 72.8546 58.3536V63.6286C73.185 66.7017 75.771 69.1004 78.9264 69.1403L79.0064 69.1408H83.7275C86.888 69.1408 89.4501 71.6996 89.4501 74.856V84.786C89.4501 87.9423 86.888 90.5011 83.7275 90.5011H73.7845C70.624 90.5011 68.0619 87.9423 68.0619 84.786V78.928C68.0735 75.5152 65.3127 72.7391 61.8954 72.7276L61.912 72.7128H58.4766C55.3161 72.7128 52.754 70.154 52.754 66.9977V58.3536C52.754 55.1972 55.3161 52.6385 58.4766 52.6385H67.132Z" fill="black"/>
+      <path d="M28.3947 11.6782C31.5552 11.6782 34.1173 14.2369 34.1173 17.3933V23.2513C34.1058 26.6641 36.8666 29.4401 40.2839 29.4517L40.2673 29.4665H43.7027C46.8632 29.4665 49.4253 32.0252 49.4253 35.1816V43.8257C49.4253 46.9821 46.8632 49.5408 43.7027 49.5408H35.0472C31.8868 49.5408 29.3247 46.9821 29.3247 43.8257V38.5507C28.9943 35.4776 26.4082 33.0788 23.2529 33.0389L23.1729 33.0384H18.4517C15.2912 33.0384 12.7292 30.4797 12.7292 27.3233V17.3933C12.7292 14.2369 15.2912 11.6782 18.4517 11.6782H28.3947Z" fill="black"/>
+      <path d="M83.7275 11.6782C86.888 11.6782 89.4501 14.2369 89.4501 17.3933V27.3233C89.4501 30.4797 86.888 33.0384 83.7275 33.0384H79.0064L78.9264 33.0389C75.771 33.0788 73.185 35.4776 72.8546 38.5507V43.8257C72.8546 46.9821 70.2925 49.5408 67.132 49.5408H58.4766C55.3161 49.5408 52.754 46.9821 52.754 43.8257V35.1816C52.754 32.0252 55.3161 29.4665 58.4766 29.4665H61.912L61.8954 29.4517C65.3127 29.4401 68.0735 26.6641 68.0619 23.2513V17.3933C68.0619 14.2369 70.624 11.6782 73.7845 11.6782H83.7275Z" fill="black"/>
+    </mask>
+  </defs>
+</svg>
+
+<deck-stage width="1920" height="1080">
+
+<!-- ============================================================= -->
+<!-- 01 TITLE -->
+<!-- ============================================================= -->
+<section data-label="01 Title">
+  <div class="chrome dark">
+    <div class="nodegraph">
+      <svg viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+        <g class="g1" opacity="0.4">
+          <path class="line" d="M 100 200 Q 400 350 800 250 T 1800 320" />
+          <path class="line" d="M 200 960 Q 500 760 900 860 T 1700 760" />
+          <circle class="node" cx="400" cy="310" r="5" />
+          <circle class="node" cx="800" cy="250" r="5" />
+          <circle class="node" cx="500" cy="840" r="5" />
+          <circle class="node" cx="900" cy="860" r="5" />
+        </g>
+        <g class="g2" opacity="0.25">
+          <path class="line" d="M 1300 60 Q 1000 400 600 300 T 100 600" />
+          <circle class="node" cx="900" cy="370" r="4" />
+          <circle class="node" cx="300" cy="450" r="4" />
+        </g>
+      </svg>
+    </div>
+    <div class="particles">
+      <span style="left: 8%; animation-duration: 14s; animation-delay: 0s;"></span>
+      <span style="left: 22%; animation-duration: 18s; animation-delay: 3s;"></span>
+      <span style="left: 36%; animation-duration: 12s; animation-delay: 1s; width: 2px; height: 2px;"></span>
+      <span style="left: 48%; animation-duration: 20s; animation-delay: 5s;"></span>
+      <span style="left: 61%; animation-duration: 16s; animation-delay: 2s; width: 4px; height: 4px;"></span>
+      <span style="left: 74%; animation-duration: 22s; animation-delay: 4s;"></span>
+      <span style="left: 86%; animation-duration: 15s; animation-delay: 0.5s;"></span>
+    </div>
+
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>hivemind · overview</span></div>
+      <div>hivemind.wandb.tools</div>
+    </div>
+
+    <!-- Every agent feeds one mark -->
+    <div class="t-orbit" aria-hidden="true">
+      <svg class="t-orbit-lines" viewBox="0 0 700 700">
+        <circle cx="350" cy="350" r="290" class="ring" />
+        <line x1="350" y1="60"  x2="350" y2="145" />
+        <line x1="626" y1="260" x2="545" y2="286" />
+        <line x1="520" y1="585" x2="470" y2="516" />
+        <line x1="180" y1="585" x2="230" y2="516" />
+        <line x1="74"  y1="260" x2="155" y2="286" />
+      </svg>
+      <div class="t-orbit-logo"><svg class="hm-logo" viewBox="0 0 103 103"><rect width="102.179" height="102.179" rx="15.0506" fill="currentColor" mask="url(#hm-mask)" /></svg></div>
+      <div class="t-chip" style="left: 350px; top: 60px;"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#D97757" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"></path></svg></div>
+      <div class="t-chip" style="left: 626px; top: 260px;"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="codex-g" gradientUnits="userSpaceOnUse" x1="12" x2="12" y1="3" y2="21"><stop stop-color="#B1A7FF"/><stop offset=".5" stop-color="#7A9DFF"/><stop offset="1" stop-color="#3941FF"/></linearGradient></defs><path fill="#fff" d="M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z"/><path fill="url(#codex-g)" d="M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z"/></svg></div>
+      <div class="t-chip" style="left: 520px; top: 585px;"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z"></path></svg></div>
+      <div class="t-chip" style="left: 180px; top: 585px;"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M9 8h3a4 4 0 0 1 0 8H9z"/></svg></div>
+      <div class="t-chip" style="left: 74px;  top: 260px;"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#fff" d="M16 6H8v12h8V6zm4 16H4V2h16v20z"/></svg></div>
+    </div>
+
+    <div class="t-main">
+      <div class="t-brand reveal">
+        <svg class="hm-logo" viewBox="0 0 103 103"><rect width="102.179" height="102.179" rx="15.0506" fill="currentColor" mask="url(#hm-mask)" /></svg>
+        <span>HiveMind</span>
+      </div>
+      <h1 class="t-title reveal-2">Agent<br/>engineering</h1>
+      <div class="t-sub reveal-3">See how your team <span class="hl">actually builds</span> with&nbsp;AI.</div>
+    </div>
+
+    <div class="t-foot reveal-4">
+      <div class="t-speaker">
+        <div class="t-headshot" role="img" aria-label="Chris Van Pelt"></div>
+        <div>
+          <div class="t-name">Chris Van Pelt</div>
+          <div class="t-role mono">co-founder · weights &amp; biases · coreweave</div>
+        </div>
+      </div>
+      <div class="t-event mono"><span data-company-line hidden>prepared for <span data-company></span> · </span><span data-today></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 02 PROBLEM -->
+<!-- ============================================================= -->
+<section data-label="02 Problem">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>the problem</span></div>
+      <div class="mono">02 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow">Are the agent bills worth it?</div>
+      <div class="slide-title" style="margin-top: 16px;">The answer exists.<br/>It's just <span style="color: var(--accent);">stranded</span>.</div>
+    </div>
+    <div class="strand reveal-2">
+      <div class="strand-card"><div class="k">claude code</div><div class="p mono">~/.claude/projects</div></div>
+      <div class="strand-card"><div class="k">codex</div><div class="p mono">~/.codex/sessions</div></div>
+      <div class="strand-card"><div class="k">cursor</div><div class="p mono">…/Cursor/state.vscdb</div></div>
+      <div class="strand-card"><div class="k">devin</div><div class="p mono">…/devin/cli/sessions.db</div></div>
+      <div class="strand-card"><div class="k">opencode</div><div class="p mono">~/.local/share/opencode</div></div>
+    </div>
+    <div class="reveal-3 mono" style="margin-top: auto; color: var(--mute-dark); font-size: 24px;">
+      // five tools · five formats · one per laptop · gone when the laptop is
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- WHO IT'S FOR (from hivemind-overview slide 05) -->
+<!-- ============================================================= -->
+<section data-label="03 Who it is for">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>audience</span></div>
+      <div class="mono">03 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 40px;">
+      <div class="eyebrow ink">Who it's for</div>
+      <div class="slide-title" style="margin-top: 20px;">Everyone who ships code with agents.</div>
+    </div>
+    <div class="reveal-2" style="margin-top: 80px;">
+      <div class="rows paper">
+        <div class="row">
+          <div class="idx" style="color: var(--accent);">IC</div>
+          <div class="t">Engineers who want to get better with agents.</div>
+          <div class="d">See how teammates solve similar problems.</div>
+        </div>
+        <div class="row">
+          <div class="idx" style="color: var(--accent);">STAFF</div>
+          <div class="t">Staff+ who want to spread what works.</div>
+          <div class="d">Individual tricks → team practices.</div>
+        </div>
+        <div class="row">
+          <div class="idx" style="color: var(--accent);">LEAD</div>
+          <div class="t">Leaders who own the budget<br/>and the roadmap.</div>
+          <div class="d">What it costs, what shipped, where it's stuck.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 03 HOW IT WORKS -->
+<!-- ============================================================= -->
+<section data-label="04 How it works">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>how it works</span></div>
+      <div class="mono">04 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="built-brand">
+        <svg class="hm-logo" viewBox="0 0 103 103"><rect width="102.179" height="102.179" rx="15.0506" fill="currentColor" mask="url(#hm-mask)" /></svg>
+        <span class="built-name">HiveMind</span>
+      </div>
+      <div class="slide-title" style="margin-top: 28px;">Every agent. <span style="color: var(--accent);">One shape.</span></div>
+    </div>
+    <div class="flow3 reveal-2">
+      <div class="flow-col">
+        <div class="label">ON EVERY LAPTOP</div>
+        <div class="name">a small daemon</div>
+        <div class="desc">Finds sessions from every agent. Redacts secrets before anything leaves.</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-col accent">
+        <div class="label">ONE BACKEND</div>
+        <div class="name">one schema</div>
+        <div class="desc">Normalized into one event stream, so Claude Code and Codex read the same.</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-col">
+        <div class="label">ONE VIEW</div>
+        <div class="name">the whole team</div>
+        <div class="desc">Sessions, cost and outcomes across every engineer, repo and model.</div>
+      </div>
+    </div>
+    <div class="reveal-3 mono" style="margin-top: auto; color: var(--mute-dark); font-size: 24px;">
+      // no workflow change · engineers keep whichever agent they like this week
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 04 WHAT WE CAPTURE -->
+<!-- ============================================================= -->
+<section data-label="05 What we capture">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>what you get</span></div>
+      <div class="mono">05 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow">The full trajectory</div>
+      <div class="slide-title" style="margin-top: 16px;">Four things worth keeping.</div>
+    </div>
+    <div class="cap4 reveal-2">
+      <div class="cap"><div class="k">01</div><div class="t">Transcripts</div><div class="d">Every prompt and every reply.</div></div>
+      <div class="cap"><div class="k">02</div><div class="t">Tool calls</div><div class="d">Edits, shells, searches, failures.</div></div>
+      <div class="cap"><div class="k">03</div><div class="t">Costs</div><div class="d">Tokens and dollars by user, repo, model.</div></div>
+      <div class="cap accent"><div class="k">04</div><div class="t">Outcomes</div><div class="d">Did it become a merged PR?</div></div>
+    </div>
+    <div class="reveal-3 mono" style="margin-top: auto; color: var(--mute-dark); font-size: 24px;">
+      // at W&amp;B: 711K sessions · 254 engineers · 21M tool calls · 24K merged PRs since January
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 05 TRUST (condensed from hivemind-overview slides 09–11) -->
+<!-- ============================================================= -->
+<section data-label="06 Trust">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>trust model</span></div>
+      <div class="mono">06 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow">Privacy &amp; security</div>
+      <div class="slide-title" style="margin-top: 16px;">No new <span style="color: var(--accent);">permission system</span>.</div>
+    </div>
+    <div class="cap4 reveal-2" style="grid-template-columns: repeat(3, 1fr);">
+      <div class="cap"><div class="k">VISIBILITY</div><div class="t">GitHub decides.</div><div class="d">Can read the repo, can read its sessions. No remote? Only you.</div></div>
+      <div class="cap"><div class="k">SECRETS</div><div class="t">Scrubbed on-device.</div><div class="d">Keys, tokens and env vars are redacted before anything leaves the laptop.</div></div>
+      <div class="cap accent"><div class="k">DEPLOYMENT</div><div class="t">Hosted or yours.</div><div class="d">Self-host the whole stack and transcripts never leave your network.</div></div>
+    </div>
+    <div class="reveal-3 mono" style="margin-top: auto; color: var(--mute-dark); font-size: 24px;">
+      // override at any layer: mark a session private · disable sharing per repo or per user
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- SECURITY (simplified from hivemind-overview slide 10) -->
+<!-- ============================================================= -->
+<section data-label="07 Security">
+  <div class="chrome paper">
+    <div class="dotgrid"></div>
+    <div class="header-bar" style="color: var(--ink); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--ink);"></span><span>trust model · security</span></div>
+      <div class="mono">07 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow ink">Security</div>
+      <div class="slide-title" style="margin-top: 16px;">Three gates. Each fails <span style="color: var(--accent);">closed</span>.</div>
+    </div>
+    <div class="gates reveal-2" style="grid-template-columns: repeat(3, 1fr); gap: 28px; margin-top: 70px;">
+      <div class="gate">
+        <div class="gate-num">01 · DEVICE</div>
+        <div class="gate-title" style="margin-top: 28px;">Keychain-stored, auto-rotated.</div>
+        <div class="gate-sub">Short-lived tokens, never on disk in plaintext.</div>
+        <div class="gate-list" style="margin-top: 40px;">
+          <div class="gl-row"><span class="gl-dot"></span>24-hour rotation</div>
+          <div class="gl-row"><span class="gl-dot"></span>instant revoke</div>
+        </div>
+      </div>
+      <div class="gate gate-pinned">
+        <div class="gate-num">02 · IDENTITY</div>
+        <div class="gate-title" style="margin-top: 28px;">SSO &amp; SCIM from your IdP.</div>
+        <div class="gate-sub">Membership and offboarding follow your directory.</div>
+        <div class="gate-list" style="margin-top: 40px;">
+          <div class="gl-row"><span class="gl-dot"></span>Okta · Azure AD · Google</div>
+          <div class="gl-row"><span class="gl-dot"></span>auto-deprovision</div>
+        </div>
+      </div>
+      <div class="gate">
+        <div class="gate-num">03 · NETWORK</div>
+        <div class="gate-title" style="margin-top: 28px;">Private by default.</div>
+        <div class="gate-sub">No public ingress to the data plane, or run it all in your own VPC.</div>
+        <div class="gate-list" style="margin-top: 40px;">
+          <div class="gl-row"><span class="gl-dot"></span>private connect</div>
+          <div class="gl-row"><span class="gl-dot"></span>audit log on every read</div>
+        </div>
+      </div>
+    </div>
+    <div class="gate-perimeter reveal-3">
+      <span class="gp-label">PERIMETER</span>
+      <span class="gp-text">Pull a token, an SSO group, or the network path, and the next request stops at the door.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- REVIEW (simplified from hivemind-overview slide 21, plus screencasts) -->
+<!-- ============================================================= -->
+<section data-label="08 Review">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>the new bottleneck</span></div>
+      <div class="mono">08 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 16px;">
+      <div class="eyebrow">The new bottleneck</div>
+      <div class="slide-title" style="margin-top: 8px; font-size: 72px;">Review is <span style="color: var(--accent);">where the time goes</span>.</div>
+    </div>
+    <div class="qa-grid reveal-2" style="margin-top: 32px; flex: 1; min-height: 0; grid-template-columns: 1fr 1.2fr;">
+      <div class="qa-panel qa-panel-shot">
+        <div class="qa-panel-head">
+          <span class="qa-panel-kicker">THUMBNAILS</span>
+          <span class="qa-panel-meta">every session</span>
+        </div>
+        <div class="qa-panel-title">Skim a session at a&nbsp;glance.</div>
+        <div class="qa-shot">
+          <img src="assets/qa-thumbnails.png" alt="HiveMind session viewer with inline thumbnails of each generated artifact"/>
+        </div>
+      </div>
+      <div class="qa-panel qa-panel-shot">
+        <div class="qa-panel-head">
+          <span class="qa-panel-kicker">NEW · SCREENCASTS</span>
+          <span class="qa-panel-meta">agent-recorded demos</span>
+        </div>
+        <div class="qa-panel-title">Watch the feature work, checks and&nbsp;all.</div>
+        <div class="qa-shot">
+          <img src="assets/screencast.png" style="object-fit: contain; object-position: center;" alt="HiveMind session screencast: a narrated video of the agent demoing its change, with 14 of 14 checks passed"/>
+        </div>
+      </div>
+    </div>
+    <div class="reveal-3 mono" style="padding-top: 18px; color: var(--mute-dark); font-size: 22px;">
+      // agents write code faster than people can read it · so we review the trajectory, not just the diff
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 06 SAID vs DID (numbers from ../hivemind-agent-engineering/assets/charts/effort.json) -->
+<!-- ============================================================= -->
+<section data-label="09 Said vs did">
+  <div class="chrome blue">
+    <div class="header-bar" style="color: var(--paper); opacity: 0.6;">
+      <div class="lhs"><span class="dot" style="background: var(--paper);"></span><span>is it actually working?</span></div>
+      <div class="mono">09 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 30px;">
+      <div class="eyebrow" style="opacity: 0.7;">We asked 49 W&amp;B engineers, 198 times</div>
+      <div class="eh-q">"How long would this merged task have taken you without&nbsp;AI?"</div>
+    </div>
+    <div class="eh-hero reveal-2">
+      <div class="eh-col">
+        <div class="eh-v eh-said">2 hours</div>
+        <div class="eh-c">what they said</div>
+      </div>
+      <div class="eh-arrow" aria-hidden="true">→</div>
+      <div class="eh-col">
+        <div class="eh-v">29 min</div>
+        <div class="eh-c">what the agent actually worked</div>
+      </div>
+    </div>
+    <div class="eh-stats reveal-3">
+      <div><b>5×</b> faster on the typical task</div>
+      <div><b>95%</b> beat the estimate</div>
+      <div><b>1.4×</b> faster end to end</div>
+    </div>
+    <div class="mono reveal-4" style="margin-top: auto; color: var(--ink); opacity: 0.6; font-size: 22px;">
+      // in-product survey on merged PRs · Jul → Sep 2026 · medians · you get this survey for your team too
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 07 SECTION: DEMO -->
+<!-- ============================================================= -->
+<section data-label="10 Section · Demo">
+  <div class="chrome blue">
+    <div class="header-bar" style="color: var(--paper); opacity: 0.55;">
+      <div class="lhs"><span class="dot" style="background: var(--paper);"></span><span>demo</span></div>
+      <div class="mono">10 / 12</div>
+    </div>
+    <div class="section-divider" style="flex: 1;">
+      <div>
+        <div class="secnum reveal" style="color: var(--paper); opacity: 0.6; margin-top: 80px;">LIVE DEMO</div>
+        <div class="sectitle reveal-2" style="color: var(--paper); margin-top: 30px;">Let's<br/>look.</div>
+      </div>
+      <div class="reveal-3" style="display: flex; align-items: center; gap: 32px; color: var(--paper); opacity: 0.7; font-size: 32px;">
+        <div class="mono">troubleshoot</div><div>·</div><div class="mono">share</div><div>·</div><div class="mono">improve</div><div>·</div><div class="mono">measure</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 08 GETTING STARTED -->
+<!-- ============================================================= -->
+<section data-label="11 Getting started">
+  <div class="chrome dark">
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>getting started</span></div>
+      <div class="mono">11 / 12</div>
+    </div>
+    <div class="reveal" style="margin-top: 50px;">
+      <div class="eyebrow">Your team, your data</div>
+      <div class="slide-title" style="margin-top: 16px;">Start with <span style="color: var(--accent);">one team</span>.</div>
+    </div>
+    <div class="cta2 reveal-2">
+      <div class="cta">
+        <div class="cta-k mono">HOSTED</div>
+        <div class="cta-t">Sign up in a minute.</div>
+        <div class="cta-d">Install the daemon, sign in with GitHub, and your sessions start flowing.</div>
+        <div class="cta-link mono">hivemind.wandb.tools</div>
+      </div>
+      <div class="cta">
+        <div class="cta-k mono">SELF-HOSTED</div>
+        <div class="cta-t">Run it on your own boxes.</div>
+        <div class="cta-d">One command brings up the whole stack. Your transcripts never leave your network.</div>
+        <pre class="cta-code mono">curl -fsSL hivemind.wandb.tools/install | sh
+hivemind serve up</pre>
+        <div class="cta-link mono">hivemind.wandb.tools/docs/self-hosting</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<!-- 09 QUESTIONS -->
+<!-- ============================================================= -->
+<section data-label="12 Questions">
+  <div class="chrome dark">
+    <div class="nodegraph">
+      <svg viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+        <g class="g1" opacity="0.4">
+          <path class="line" d="M 200 900 Q 500 700 900 820 T 1700 700" />
+          <path class="line" d="M 100 200 Q 400 350 800 250 T 1800 320" />
+          <circle class="node" cx="200" cy="900" r="5" />
+          <circle class="node" cx="900" cy="820" r="5" />
+          <circle class="node" cx="400" cy="310" r="5" />
+          <circle class="node" cx="1200" cy="280" r="5" />
+        </g>
+      </svg>
+    </div>
+    <div class="header-bar">
+      <div class="lhs"><span class="dot"></span><span>thank you</span></div>
+      <div class="mono">12 / 12</div>
+    </div>
+    <div class="q-wrap" style="position: relative; z-index: 2;">
+      <div class="t-brand reveal">
+        <svg class="hm-logo" viewBox="0 0 103 103"><rect width="102.179" height="102.179" rx="15.0506" fill="currentColor" mask="url(#hm-mask)" /></svg>
+        <span>HiveMind</span>
+      </div>
+      <div class="q-big reveal-2" style="margin-top: 30px; font-size: 220px;">Questions<span class="dot">?</span></div>
+      <div class="body reveal-3" style="margin-top: 56px; color: var(--mute-dark); display: grid; grid-template-columns: auto 1fr; gap: 14px 36px; align-items: baseline;">
+        <div class="mono" style="font-size: 24px; letter-spacing: 0.1em;">TRY IT</div>
+        <div class="mono" style="color: var(--accent);">hivemind.wandb.tools</div>
+        <div class="mono" style="font-size: 24px; letter-spacing: 0.1em;">CONTACT</div>
+        <div class="mono" style="color: var(--accent);">vanpelt@wandb.com</div>
+      </div>
+    </div>
+    <div class="header-bar" style="margin-top: auto;">
+      <div class="mono">Chris Van Pelt</div>
+      <div>HIVEMIND</div>
+    </div>
+  </div>
+</section>
+
+</deck-stage>
+<script>
+// ?company=Acme sets the customer name shown on the title slide and remembers it
+// (?company= with no value clears it). The date is always today's.
+(function () {
+  var KEY = 'hm-briefing-company', name = null;
+  try { name = new URLSearchParams(location.search).get('company'); } catch (e) {}
+  try {
+    if (name !== null) { name = name.trim(); if (name) localStorage.setItem(KEY, name); else localStorage.removeItem(KEY); }
+    else name = localStorage.getItem(KEY);
+  } catch (e) {}
+  document.querySelectorAll('[data-company]').forEach(function (el) { el.textContent = name || ''; });
+  document.querySelectorAll('[data-company-line]').forEach(function (el) { el.hidden = !name; });
+  var today = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  document.querySelectorAll('[data-today]').forEach(function (el) { el.textContent = today; });
+})();
+</script>
+</body>
+</html>
