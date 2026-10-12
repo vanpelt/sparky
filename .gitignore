@@ -10,3 +10,11 @@ prezos/**/*.pdf
 .DS_Store
 **/.DS_Store
 __marimo__/
+
+# iOS (ios/<App>/): private seed data never leaves this machine
+ios/**/Seed/*.local.json
+ios/**/xcuserdata/
+ios/**/DerivedData/
+ios/**/build/
+*.xcuserstate
+ios/.build/
