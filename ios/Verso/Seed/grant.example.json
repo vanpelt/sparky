@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "grant": {
+    "revestShares": 100000,
+    "rsuShares": 100000,
+    "rolloverShares": 1000,
+    "rolloverVestDate": null,
+    "vestDayOfMonth": 20,
+    "bookOneStart": null,
+    "salaryAnnual": 200000,
+    "bonusAnnual": 50000,
+    "taxRevest": 0.238,
+    "revestSheltered": false,
+    "taxOrdinary": 0.503
+  },
+  "enoughLinePerDay": null
+}

@@ -1,0 +1,175 @@
+name: Verso
+options:
+  bundleIdPrefix: com.vanpelt.personal
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    # Overridable: `xcodebuild ... DEVELOPMENT_TEAM=XXXXXXXXXX` or set XCODE_DEVELOPMENT_TEAM in your env.
+    # Personal team (vanpelt@gmail.com). Override per build with `xcodebuild ... DEVELOPMENT_TEAM=XXXXXXXXXX`.
+    DEVELOPMENT_TEAM: D7HZM3ZQ7G
+    # Root of every identifier (bundle ids, App Group, URL name). Bundle ids and App Groups are unique
+    # across ALL of Apple, not per team: whichever team signs first owns them, and a free team can't
+    # release them. If signing says an id "is not available", change this one line and regenerate.
+    VERSO_ID: com.vanpelt.personal.verso
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    GENERATE_INFOPLIST_FILE: NO
+
+targets:
+  VersoCore:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Core
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(VERSO_ID).core
+        PRODUCT_NAME: VersoCore
+        APPLICATION_EXTENSION_API_ONLY: YES
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+
+  Verso:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    dependencies:
+      - target: VersoCore
+        embed: true
+      - target: VersoWidgets
+        embed: true
+    entitlements:
+      path: App/Verso.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(VERSO_ID)
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Verso
+        VersoAppGroup: group.$(VERSO_ID)
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        NSSupportsLiveActivities: false
+        ITSAppUsesNonExemptEncryption: false
+        # iPhone stays portrait-locked. The ~ipad key only matters to the `IPAD=1 scripts/sim.sh` proxy build
+        # (shipping is TARGETED_DEVICE_FAMILY 1), where landscape is what fits the Duo's open spread.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleURLTypes:
+          - CFBundleURLName: "$(VERSO_ID)"
+            CFBundleURLSchemes:
+              - verso
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(VERSO_ID)
+        PRODUCT_NAME: Verso
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    postBuildScripts:
+      - name: Copy local seed (if present)
+        basedOnDependencyAnalysis: false
+        script: |
+          SEED="$SRCROOT/Seed/grant.local.json"
+          DEST="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/grant.local.json"
+          if [ -f "$SEED" ]; then cp "$SEED" "$DEST"; echo "Verso: bundled local seed"; else rm -f "$DEST"; echo "Verso: no local seed"; fi
+
+  VersoWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widgets
+      - path: Shared
+    dependencies:
+      - target: VersoCore
+        embed: false
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    entitlements:
+      path: Widgets/VersoWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(VERSO_ID)
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Verso
+        VersoAppGroup: group.$(VERSO_ID)
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(VERSO_ID).widgets
+        PRODUCT_NAME: VersoWidgets
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"
+
+  VersoCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: VersoCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(VERSO_ID).coretests
+        GENERATE_INFOPLIST_FILE: YES
+
+  VersoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: Verso
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(VERSO_ID).uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Verso
+
+schemes:
+  Verso:
+    build:
+      targets:
+        Verso: all
+        VersoWidgets: all
+        VersoCore: all
+        VersoCoreTests: [test]
+        VersoUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - VersoCoreTests
+        - VersoUITests
+    archive:
+      config: Release
