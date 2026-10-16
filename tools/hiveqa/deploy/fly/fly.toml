@@ -1,0 +1,60 @@
+# Fly.io configuration for headscale control plane.
+#
+# Deploy:
+#   cd deploy/fly
+#   fly launch --copy-config --no-deploy
+#   fly volumes create headscale_data --size 1 --region ord
+#   fly secrets set HEADSCALE_SERVER_URL=https://YOUR_APP.fly.dev
+#   fly deploy
+#
+# Then create a user and auth key:
+#   fly ssh console
+#   headscale users create hiveqa
+#   headscale preauthkeys create --user hiveqa --reusable --ephemeral --expiration 720h
+
+app = "hiveqa-headscale"  # UPDATE: choose your app name
+primary_region = "ord"     # UPDATE: choose your region
+
+[build]
+  dockerfile = "Dockerfile.headscale"
+
+[env]
+  HEADSCALE_CONFIG = "/etc/headscale/config.yaml"
+
+# Headscale control plane — HTTP.
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = false   # headscale must always be reachable
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "5s"
+    path = "/health"
+
+# STUN/DERP on UDP — needed for NAT traversal.
+[[services]]
+  internal_port = 3478
+  protocol = "udp"
+
+  [[services.ports]]
+    port = 3478
+
+# Persistent volume for headscale state (keys, SQLite).
+[[mounts]]
+  source = "headscale_data"
+  destination = "/data/headscale"
+
+[vm]
+  size = "shared-cpu-1x"  # 256MB RAM — plenty for headscale
+  memory = 256
