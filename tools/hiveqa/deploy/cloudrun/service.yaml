@@ -1,0 +1,84 @@
+# Cloud Run service definition for headscale control plane.
+#
+# Deploy:
+#   gcloud run services replace deploy/cloudrun/service.yaml --region=us-central1
+#
+# Prerequisites:
+#   1. Build and push image:
+#      docker build -f deploy/cloudrun/Dockerfile.headscale -t gcr.io/PROJECT/headscale:latest deploy/cloudrun/
+#      docker push gcr.io/PROJECT/headscale:latest
+#
+#   2. Create Cloud SQL Postgres instance:
+#      gcloud sql instances create headscale --database-version=POSTGRES_15 \
+#        --tier=db-f1-micro --region=us-central1
+#      gcloud sql databases create headscale --instance=headscale
+#      gcloud sql users create headscale --instance=headscale --password=SECRET
+#
+#   3. Create secrets:
+#      echo -n "SECRET" | gcloud secrets create headscale-db-pass --data-file=-
+#      echo -n "NOISE_KEY_CONTENTS" | gcloud secrets create headscale-noise-key --data-file=-
+#
+#   4. Grant Cloud Run service account access to Cloud SQL and secrets.
+#
+# Then configure hiveqad on your Docker VM:
+#   hiveqad --control-url=https://headscale-CUSTOMER.run.app --tls=acme \
+#     --acme-domain=customer.hiveqa.dev --acme-email=admin@customer.com \
+#     --acme-dns-provider=gcloud
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: headscale
+  annotations:
+    run.googleapis.com/launch-stage: GA
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Connect to Cloud SQL.
+        run.googleapis.com/cloudsql-instances: "PROJECT:REGION:headscale"
+        # Min instances to avoid cold starts (headscale needs to be always reachable).
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"  # headscale doesn't support HA
+    spec:
+      containerConcurrency: 1000
+      containers:
+        - image: gcr.io/PROJECT/headscale:latest  # UPDATE THIS
+          ports:
+            - containerPort: 8080
+          env:
+            - name: HEADSCALE_SERVER_URL
+              value: "https://headscale-CUSTOMER.run.app"  # UPDATE THIS
+            - name: HEADSCALE_DB_HOST
+              value: "/cloudsql/PROJECT:REGION:headscale"  # UPDATE THIS
+            - name: HEADSCALE_DB_NAME
+              value: "headscale"
+            - name: HEADSCALE_DB_USER
+              value: "headscale"
+            - name: HEADSCALE_DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: headscale-db-pass
+                  key: latest
+            - name: HEADSCALE_NOISE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: headscale-noise-key
+                  key: latest
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
