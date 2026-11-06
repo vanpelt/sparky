@@ -1,0 +1,10 @@
+[project]
+name = "reframe"
+version = "0.1.0"
+description = "Phase 0 probes for an Insta360 X6 pre-editing tool: .insv metadata, calibration, reframed renders"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10",
+    "scipy>=1.13",
+]

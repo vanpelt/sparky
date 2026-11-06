@@ -1,0 +1,5 @@
+out/
+.venv/
+.build/
+.swiftpm/
+*.app/
