@@ -7,7 +7,7 @@
 //     0-8   body->lens rotation, row-major     9  xi
 //     10-11 fx, fy (source px)                 12-13 cx, cy (source px)
 //     14-18 k1..k5   19-22 p1..p4   23-26 s1..s4
-//     27-28 x range of this lens in the texture  30-31 texture width, height
+//     27-28 x range of this lens in the texture  29 sample scale (10-bit fix)  30-31 texture width, height
 //   frame:
 //     64-72 body<-camera rotation, row-major   73 focal (px, flat)   74 projection (0 flat, 1 equirect)
 //     75 rolling-shutter readout (s, 0 = off)  76-78 body angular velocity (rad/s)
@@ -47,23 +47,17 @@ inline float2 projectLens(constant float *L, float3 local, thread float &angle, 
     return float2(L[12] + dx * L[10], L[13] + dy * L[11]);
 }
 
-kernel void reframe(texture2d<float, access::write> out [[texture(0)]],
-                    texture2d<float> luma0 [[texture(1)]], texture2d<float> chroma0 [[texture(2)]],
-                    texture2d<float> luma1 [[texture(3)]], texture2d<float> chroma1 [[texture(4)]],
-                    texture3d<float> lut [[texture(5)]],
-                    constant float *P [[buffer(0)]],
-                    uint2 gid [[thread_position_in_grid]]) {
-    uint W = out.get_width(), H = out.get_height();
-    if (gid.x >= W || gid.y >= H) return;
-
+/// Ray through output pixel `pos` -> blended RGB from both lenses (camera encoding, 0..1).
+inline float3 shade(float2 pos, float W, float H, texture2d<float> luma0, texture2d<float> chroma0,
+                    texture2d<float> luma1, texture2d<float> chroma1, constant float *P) {
     float3 cam;
     if (P[74] < 0.5f) {
         float f = P[73];
-        float u = (gid.x + 0.5f - W * 0.5f) / f, v = (gid.y + 0.5f - H * 0.5f) / f;
+        float u = (pos.x - W * 0.5f) / f, v = (pos.y - H * 0.5f) / f;
         cam = float3(1, -u, -v);  // forward +X, right -Y, down -Z
     } else {
-        float lon = (gid.x + 0.5f) / W * 2 * M_PI_F - M_PI_F;
-        float lat = M_PI_F * 0.5f - (gid.y + 0.5f) / H * M_PI_F;
+        float lon = pos.x / W * 2 * M_PI_F - M_PI_F;
+        float lat = M_PI_F * 0.5f - pos.y / H * M_PI_F;
         cam = float3(cos(lat) * cos(lon), -cos(lat) * sin(lon), sin(lat));
     }
     float3 body = float3(P[64] * cam.x + P[65] * cam.y + P[66] * cam.z,
@@ -89,18 +83,56 @@ kernel void reframe(texture2d<float, access::write> out [[texture(0)]],
         float w = inside ? clamp((90.0f - angle) / belt + 0.5f, 0.0f, 1.0f) : 0.0f;
         if (w > 0) {
             float2 uv = (px + 0.5f) / float2(L[30], L[31]);
-            float3 rgb = i == 0 ? yuvToRGB(luma0.sample(linearClamp, uv).r, chroma0.sample(linearClamp, uv).rg)
-                                : yuvToRGB(luma1.sample(linearClamp, uv).r, chroma1.sample(linearClamp, uv).rg);
+            float k = L[29];  // P010 stores v10 << 6; rescale so 1023 -> 1.0
+            float3 rgb = i == 0
+                ? yuvToRGB(luma0.sample(linearClamp, uv).r * k, chroma0.sample(linearClamp, uv).rg * k)
+                : yuvToRGB(luma1.sample(linearClamp, uv).r * k, chroma1.sample(linearClamp, uv).rg * k);
             acc += rgb * w;
             wsum += w;
         }
     }
-    float3 c = wsum > 0 ? saturate(acc / wsum) : float3(0);
-    if (P[80] > 0.5f) {
-        float n = P[81];
-        float3 coord = (c * (n - 1) + 0.5f) / n;  // texel centres
-        c = lut.sample(linearClamp, coord).rgb;
+    return wsum > 0 ? saturate(acc / wsum) : float3(0);
+}
+
+inline float3 applyLUT(float3 c, texture3d<float> lut, constant float *P) {
+    if (P[80] < 0.5f) return c;
+    float n = P[81];
+    return lut.sample(linearClamp, (c * (n - 1) + 0.5f) / n).rgb;  // texel centres
+}
+
+/// Preview / stills: RGB(A) output.
+kernel void reframe(texture2d<float, access::write> out [[texture(0)]],
+                    texture2d<float> luma0 [[texture(1)]], texture2d<float> chroma0 [[texture(2)]],
+                    texture2d<float> luma1 [[texture(3)]], texture2d<float> chroma1 [[texture(4)]],
+                    texture3d<float> lut [[texture(5)]],
+                    constant float *P [[buffer(0)]],
+                    uint2 gid [[thread_position_in_grid]]) {
+    uint W = out.get_width(), H = out.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+    float3 c = shade(float2(gid) + 0.5f, W, H, luma0, chroma0, luma1, chroma1, P);
+    out.write(float4(applyLUT(c, lut, P), 1), gid);
+}
+
+/// Export: 10-bit 4:2:2 Y'CbCr (BT.709, video range) straight into an 'x422' pixel buffer.
+/// One thread per horizontal pixel pair; chroma is the average of the pair.
+kernel void reframeYUV422(texture2d<float, access::write> outY [[texture(0)]],
+                          texture2d<float> luma0 [[texture(1)]], texture2d<float> chroma0 [[texture(2)]],
+                          texture2d<float> luma1 [[texture(3)]], texture2d<float> chroma1 [[texture(4)]],
+                          texture3d<float> lut [[texture(5)]],
+                          texture2d<float, access::write> outC [[texture(6)]],
+                          constant float *P [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    uint W = outY.get_width(), H = outY.get_height();
+    if (gid.x * 2 >= W || gid.y >= H) return;
+    const float q = 64.0f / 65535.0f * 1023.0f;  // normalized 10-bit value -> 16-bit container
+    float2 cbcr = 0;
+    for (uint k = 0; k < 2; k++) {
+        uint2 p = uint2(gid.x * 2 + k, gid.y);
+        float3 c = applyLUT(shade(float2(p) + 0.5f, W, H, luma0, chroma0, luma1, chroma1, P), lut, P);
+        float y = dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+        outY.write(float4((y * 876.0f + 64.0f) / 1023.0f * q, 0, 0, 0), p);
+        cbcr += float2((c.b - y) / 1.8556f, (c.r - y) / 1.5748f) * 0.5f;
     }
-    out.write(float4(c, 1), gid);
+    outC.write(float4((cbcr * 896.0f + 512.0f) / 1023.0f * q, 0, 0), gid);
 }
 """#

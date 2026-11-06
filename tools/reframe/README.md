@@ -33,14 +33,40 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   Flat (16:9) or 360°; in 360°, click to aim the flat camera. Stabilization: Off / Follow / Lock.
   Scrubbing decodes from the proxy; playback streams the 8K master in real time
   (both 3840² 10-bit lens tracks at 48 fps on an M6).
+- **Horizon scan:** under the viewer, x is time and y is heading (the whole horizon, levelled
+  and heading-locked to where the camera faced at the start). The line through it is where the
+  camera looks. Click to jump there *and* look there; drag to scrub. The ribbon underneath is
+  gyro speed, so calm stretches are easy to spot.
+- **Shots:** N starts a shot at the playhead (5 s), I and O set its ends, K keyframes the current
+  framing. Between keyframes the camera eases along a smooth path; dragging the view steers by
+  hand until you press K. Shots are saved per footage folder in
+  `~/Library/Application Support/Reframe/projects/` (the footage folder is never written).
+- **Export (⌘E):** ProRes 422 HQ / 422 / LT, 10-bit 4:2:2, at HD, 4K UHD, vertical or square,
+  with 24-bit source audio and a time-of-day timecode track. Each frame is rendered straight into
+  the encoder's 10-bit 4:2:2 Y'CbCr buffer, with no intermediate RGB file. Files are named
+  `<recording date and time> <shot name>.mov`. Optional timelines:
+  - **DaVinci Resolve:** OpenTimelineIO (`.otio`). Import it with File › Import › Timeline.
+  - **Final Cut Pro:** FCPXML 1.10, with an event of selects and a project in shot order.
+  Exports stay in I-Log unless you choose to bake the preview look in.
 - **LUTs:** reads `.cube` files from `~/Downloads/X6_I-Log_LUTs` (File → Choose LUT Folder).
-  They apply to the preview of I-Log clips only and are never baked into exports. The LUT files
-  are Insta360's and are not in the repo.
+  They apply to the preview of I-Log clips only and are never baked into exports unless you ask.
+  The LUT files are Insta360's and are not in the repo.
 
-Debug environment variables, used to check the app without screen recording:
+Keys: Space play/pause, ←/→ step a frame (⇧ for 10), N new shot, I/O in/out, K keyframe,
+F toggle frame/360°, Esc leave the shot, ⌘E export, ⌘O open folder.
+
+`reframe-cli export clip.insv 14 20 out/ --yaw 180 --hfov 100` exports one shot headlessly. On an M6,
+1080p exports run at about 190 fps (4× real time). Exported frames match the Python reference at
+45–47 dB PSNR, including ProRes compression.
+
+Debug environment variables, used to check the app without screen recording. Launch through
+LaunchServices (`open -n -F --env KEY=value --stderr log.txt .build/Reframe.app`); executing the
+binary inside the bundle directly can leave the app without a window.
 `REFRAME_SELECT=<name substring>`, `REFRAME_PROJECTION=equirect`, `REFRAME_YAW=<deg>`,
-`REFRAME_AUTOPLAY=1`, `REFRAME_DEBUG=1` (playback fps to stderr),
-`REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal view).
+`REFRAME_SEEK=<s>`, `REFRAME_AUTOPLAY=1`, `REFRAME_DEMO_SHOT=1` (a keyframed shot at 0:12–0:30),
+`REFRAME_EXPORT_SHEET=1`, `REFRAME_EXPORT_AUTOSTART=1`, `REFRAME_DEBUG=1` (playback fps and window
+state to stderr), `REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal
+view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.
 
 ## Python reference
 

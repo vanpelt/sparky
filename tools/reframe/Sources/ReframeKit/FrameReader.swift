@@ -9,6 +9,8 @@ public final class FrameReader: @unchecked Sendable {
     public let tracks: [AVAssetTrack]
     public let duration: Double
     public let frameRate: Double
+    /// Exact frame duration (e.g. 1/48 or 1001/30000).
+    public let frameDuration: CMTime
     let pixelFormat: OSType
 
     public init(url: URL) async throws {
@@ -21,6 +23,9 @@ public final class FrameReader: @unchecked Sendable {
         tracks = video
         duration = try await asset.load(.duration).seconds
         frameRate = Double(try await first.load(.nominalFrameRate))
+        let minDuration = try await first.load(.minFrameDuration)
+        frameDuration = minDuration.isValid && minDuration.seconds > 0
+            ? minDuration : CMTime(value: 1, timescale: CMTimeScale(max(frameRate.rounded(), 1)))
         let desc = try await first.load(.formatDescriptions).first
         let bits = desc.flatMap { CMFormatDescriptionGetExtension($0, extensionKey: "BitsPerComponent" as CFString) as? Int } ?? 8
         pixelFormat = bits > 8 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange

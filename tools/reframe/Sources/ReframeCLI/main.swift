@@ -75,6 +75,36 @@ case "still":
     print(String(format: "wrote %@ %dx%d (frame %.3fs, render %.0f ms, %@)", out.path, width, height, frames.time,
                  Date().timeIntervalSince(start) * 1000, useProxy ? "proxy" : "master"))
 
+case "export":
+    // reframe-cli export <file.insv> <in> <out> <dest-dir> [--yaw --pitch --hfov --stab follow|lock|none
+    //                    --size hd|uhd|vertical|square --codec proRes422HQ --name N --bake-lut file.cube]
+    guard args.count >= 4, let tIn = Double(args[1]), let tOut = Double(args[2]) else {
+        fail("export <file.insv> <in> <out> <dest-dir> [options]")
+    }
+    let clip = try Clip(url: URL(fileURLWithPath: args[0]))
+    var options = ExportOptions(destination: URL(fileURLWithPath: args[3]))
+    options.size = ExportOptions.Size(rawValue: option("--size") ?? "hd") ?? .hd
+    options.codec = ExportOptions.Codec(rawValue: option("--codec") ?? "proRes422HQ") ?? .proRes422HQ
+    var lut: CubeLUT?
+    if let path = option("--bake-lut") { lut = try CubeLUT(url: URL(fileURLWithPath: path)); options.bakeLook = true }
+    let framing = Framing(yaw: Double(option("--yaw") ?? "0") ?? 0, pitch: Double(option("--pitch") ?? "0") ?? 0,
+                          hfov: Double(option("--hfov") ?? "100") ?? 100)
+    let shot = Shot(clipPath: clip.url.path, name: option("--name") ?? "\(clip.name) shot", inTime: tIn, outTime: tOut,
+                    framing: framing, stabilization: Motion.Stabilization(rawValue: option("--stab") ?? "follow") ?? .follow,
+                    smoothing: 0.8, lockTime: tIn)
+    let exporter = try ShotExporter(lut: lut)
+    let start = Date()
+    let result = try await exporter.export(shot, clip: clip, options: options, progress: { _ in }, isCancelled: { false })
+    let secs = Date().timeIntervalSince(start)
+    print(String(format: "wrote %@: %d frames in %.1fs (%.1f fps), timecode frame %d, audio %@",
+                 result.url.lastPathComponent, result.frameCount, secs, Double(result.frameCount) / secs,
+                 result.timecodeFrames, result.hasAudio ? "yes" : "no"))
+    let dest = URL(fileURLWithPath: args[3])
+    try Interchange.fcpxml([result], title: "Reframe selects").write(to: dest.appendingPathComponent("Reframe selects.fcpxml"),
+                                                                   atomically: true, encoding: .utf8)
+    try Interchange.otio([result], title: "Reframe selects").write(to: dest.appendingPathComponent("Reframe selects.otio"))
+    print("wrote timelines to \(dest.path)")
+
 default:
     fail("unknown command \(command)")
 }

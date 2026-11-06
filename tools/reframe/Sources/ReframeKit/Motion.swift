@@ -153,6 +153,31 @@ public final class Motion: @unchecked Sendable {
         }
     }
 
+    /// Heading (degrees, unwrapped, left-positive) of the view base for a mode, matching viewBase.
+    public func baseHeading(at t: Double, mode: Stabilization, smoothing: Double, lockTime: Double) -> Double {
+        switch mode {
+        case .follow: return heading(at: t, smoothing: smoothing) * 180 / .pi
+        case .lock: return heading(at: lockTime, smoothing: 0) * 180 / .pi
+        case .none: return heading(at: t, smoothing: 0) * 180 / .pi
+        }
+    }
+
+    /// Angular speed (deg/s) in `bins` equal time bins over [0, duration], each the bin's 90th percentile.
+    public func speedProfile(bins: Int, duration: Double) -> [Double] {
+        guard !times.isEmpty, duration > 0, bins > 0 else { return [] }
+        var buckets = [[Double]](repeating: [], count: bins)
+        let stride = max(1, times.count / (bins * 40))
+        for i in Swift.stride(from: 0, to: times.count, by: stride) {
+            let b = Int(times[i] / duration * Double(bins))
+            if b >= 0 && b < bins { buckets[b].append(simd_length(omega[i]) * 180 / .pi) }
+        }
+        return buckets.map { b in
+            guard !b.isEmpty else { return 0 }
+            let s = b.sorted()
+            return s[Int(Double(s.count - 1) * 0.9)]
+        }
+    }
+
     /// Body <- camera rotation for rendering: R_body(t)^T * viewBase * userRotation.
     public func bodyFromCamera(at t: Double, mode: Stabilization, smoothing: Double, lockTime: Double,
                                yaw: Double, pitch: Double, roll: Double) -> simd_double3x3 {
