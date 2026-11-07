@@ -91,7 +91,9 @@ final class Library {
     init() {
         renderer = try! ReframeRenderer()
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let lutDefault = home.appendingPathComponent("Downloads/X6_I-Log_LUTs")
+        // ~/Movies, not ~/Downloads: macOS asks for permission to read Downloads after every
+        // rebuild of an unsigned app, which blocks launch until someone clicks Allow.
+        let lutDefault = home.appendingPathComponent("Movies/X6_I-Log_LUTs")
         if let path = UserDefaults.standard.string(forKey: Self.lutKey) {
             setLUTFolder(URL(fileURLWithPath: path), loadNow: true)
         } else if FileManager.default.fileExists(atPath: lutDefault.path) {

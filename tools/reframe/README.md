@@ -86,7 +86,8 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   [--preset people|action|scenery]` prints every signal and suggestion and renders each
   suggestion's peak frame. `reframe-cli evaluate <footage folder>` scores every preset against the
   shots you kept and the suggestions you dismissed (recall, aim, keep rate). See `INTEREST_MAP.md`.
-- **LUTs:** reads `.cube` files from `~/Downloads/X6_I-Log_LUTs` (File → Choose LUT Folder).
+- **LUTs:** reads `.cube` files from `~/Movies/X6_I-Log_LUTs` (File → Choose LUT Folder). Keep
+  them out of Downloads, Documents and Desktop: macOS asks to allow those after every rebuild.
   They apply to the preview of I-Log clips only and are never baked into exports unless you ask.
   The LUT files are Insta360's and are not in the repo.
 
