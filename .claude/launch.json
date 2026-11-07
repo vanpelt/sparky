@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "reframe-lab",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--directory",
+        "tools/reframe-lab",
+        "lab.py",
+        "serve",
+        "--port",
+        "8765"
+      ],
+      "port": 8765
+    }
+  ]
+}

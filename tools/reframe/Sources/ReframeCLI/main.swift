@@ -11,6 +11,8 @@ import simd
 //                       [--heat] [--stills dir [--lut file.cube]]
 //   reframe-cli evaluate <footage folder> [--preset P] [--json]   (scores suggestions against your shots)
 //   reframe-cli evaluate-aim <footage folder | cloud>   (where signals would aim vs. where you aimed)
+//   reframe-cli lab-export <footage folder | cloud> --out <dir> [--every 8] [--shot-every 2] [--size 384] [--lut f.cube]
+//   reframe-cli clip-text < ["prompt", ...]   (MobileCLIP text embeddings as JSON, for tools/reframe-lab)
 //   reframe-cli models [status|install|remove]
 //   reframe-cli index <file.insv | folder | cloud>... [--no-cache]     (MobileCLIP embeddings, SEMANTIC.md)
 //   reframe-cli search "<query>" <file.insv | folder | cloud>... [--limit N] [--stills dir] [--shots] [--raw]
@@ -310,6 +312,13 @@ case "evaluate":
 case "evaluate-aim":
     guard let path = args.first else { fail("evaluate-aim <footage folder | cloud>") }
     try await evaluateAim(path == "cloud" ? CloudCache.root : URL(fileURLWithPath: path))
+
+case "lab-export":
+    guard let path = args.first, let out = option("--out") else { fail("lab-export <footage folder | cloud> --out <dir>") }
+    try await labExport(path == "cloud" ? CloudCache.root : URL(fileURLWithPath: path), out: URL(fileURLWithPath: out))
+
+case "clip-text":
+    try clipText()
 
 case "models":
     // reframe-cli models [status|install|remove]: the visual search models (SEMANTIC.md).
