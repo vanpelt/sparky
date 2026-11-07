@@ -268,6 +268,45 @@ struct ContentView: View {
                 FileHandle.standardError.write("shots hook: \(library.shots.count) shots, hover frames for \(shot.name) of \(URL(fileURLWithPath: shot.clipPath).lastPathComponent): \(library.shotFrames[shot.id]?.count ?? 0)\n".data(using: .utf8)!)
             }
         }
+        // REFRAME_GESTURE_TEST=x,y;x,y (points from the window's top-left: the first card's name, then
+        // its picture): double-click the name -> renaming, Esc; click the picture -> selected;
+        // double-click the picture -> the editor on that shot.
+        if let spec = env["REFRAME_GESTURE_TEST"], library.browse == .shots,
+           let shot = library.shots.first(where: { $0.clipPath.contains("_001.insv") }) {
+            func report(_ s: String) { FileHandle.standardError.write("gesture test: \(s)\n".data(using: .utf8)!) }
+            let pts = spec.split(separator: ";").map { $0.split(separator: ",").compactMap { Double($0) } }
+            for _ in 0..<100 where library.shotThumbnails[shot.id] == nil { try? await Task.sleep(for: .milliseconds(100)) }
+            try? await Task.sleep(for: .seconds(1))
+            guard pts.count == 2, let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 }) else { report("bad setup"); return }
+            let h = window.contentView!.bounds.height
+            func click(_ p: [Double], count: Int) {
+                let loc = NSPoint(x: p[0], y: h - p[1])
+                for n in 1...count {
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        if let e = NSEvent.mouseEvent(with: type, location: loc, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: n, pressure: 1) {
+                            NSApp.postEvent(e, atStart: false)
+                        }
+                    }
+                }
+            }
+            func editing() -> Bool { (window.firstResponder as? NSTextView)?.isFieldEditor == true }
+            click(pts[0], count: 2)
+            try? await Task.sleep(for: .milliseconds(800))
+            report("double-click name -> editing \(editing()), selected \(shotSelection == [shot.id])")
+            if let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                        windowNumber: window.windowNumber, context: nil, characters: "\u{1b}",
+                                        charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) { NSApp.postEvent(e, atStart: false) }
+            try? await Task.sleep(for: .milliseconds(500))
+            report("esc -> editing \(editing()), name '\(library.shots.first { $0.id == shot.id }?.name ?? "?")'")
+            shotSelection = []
+            click(pts[1], count: 1)
+            try? await Task.sleep(for: .milliseconds(800))
+            report("click picture -> selected \(shotSelection == [shot.id]), still shots view \(library.browse == .shots)")
+            click(pts[1], count: 2)
+            for _ in 0..<80 where viewer.activeShotID != shot.id { try? await Task.sleep(for: .milliseconds(100)) }
+            report("double-click picture -> browse \(library.browse.rawValue), active shot \(viewer.activeShotID == shot.id)")
+        }
         // REFRAME_FOCUS_TEST=1: open the first shot, focus the inspector's Name field, then a
         // click on the viewer and a Return must each give the keyboard back to the editor.
         if env["REFRAME_FOCUS_TEST"] != nil, let target = library.shots.first(where: { library.item(for: $0.clipPath) != nil }) {

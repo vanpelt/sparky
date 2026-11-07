@@ -218,9 +218,14 @@ public struct ShotStore: Codable, Sendable {
         dismissed = try c.decodeIfPresent(Set<String>.self, forKey: .dismissed) ?? []
     }
 
-    static func url(for folder: URL) -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// Where stores live: ~/Library/Application Support/Reframe/projects.
+    public static var directory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Reframe/projects", isDirectory: true)
+    }
+
+    public static func url(for folder: URL) -> URL {
+        let base = directory
         let name = folder.standardizedFileURL.path.replacingOccurrences(of: "/", with: "_")
         return base.appendingPathComponent(String(name.suffix(180)) + ".json")
     }
@@ -231,11 +236,16 @@ public struct ShotStore: Codable, Sendable {
         return store
     }
 
-    public func save(folder: URL) {
-        let u = ShotStore.url(for: folder)
-        try? FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+    public func save(folder: URL) { try? save(to: ShotStore.url(for: folder)) }
+
+    public static func load(url: URL) throws -> ShotStore {
+        try JSONDecoder().decode(ShotStore.self, from: Data(contentsOf: url))
+    }
+
+    public func save(to u: URL) throws {
+        try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? enc.encode(self).write(to: u, options: .atomic)
+        try enc.encode(self).write(to: u, options: .atomic)
     }
 }

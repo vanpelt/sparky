@@ -10,7 +10,8 @@ import simd
 //   reframe-cli analyze <file.insv | folder>... [--json] [--no-cache] [--preset blend|people|action|scenery]
 //                       [--heat] [--stills dir [--lut file.cube]]
 //   reframe-cli evaluate <footage folder> [--preset P] [--json]   (scores suggestions against your shots)
-//   reframe-cli cloud login|logout|status|list [--raw]|probe <name|mediaId>   (Insta360 Cloud spike, CLOUD.md)
+//   reframe-cli cloud login|logout|status|list [--raw]|probe <name|mediaId>|fetch <name> [--original]
+//                     |migrate [--dry-run]   (Insta360 Cloud, CLOUD.md)
 
 func fail(_ msg: String) -> Never {
     FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
@@ -244,11 +245,12 @@ case "analyze":
     }
 
 case "evaluate":
-    // reframe-cli evaluate <footage folder> [--preset P] [--json]
+    // reframe-cli evaluate <footage folder | cloud> [--preset P] [--json]
     // Scores suggestions against the shots you kept and the suggestions you dismissed in the app.
     guard let path = args.first(where: { !$0.hasPrefix("--") && args.firstIndex(of: $0).map { $0 == 0 || args[$0 - 1] != "--preset" } ?? true })
     else { fail("evaluate <footage folder> [--preset P] [--json]") }
-    let folder = URL(fileURLWithPath: path)
+    // "cloud": the Insta360 Cloud clips in the cache and their shots.
+    let folder = path == "cloud" ? CloudCache.root : URL(fileURLWithPath: path)
     let store = ShotStore.load(folder: folder)
     let clips = Clip.scan(folder: folder).compactMap { try? Clip(url: $0) }
         .filter { c in store.shots.contains { $0.clipPath == c.url.path } || store.dismissed.contains { $0.hasPrefix(c.name + "@") } }

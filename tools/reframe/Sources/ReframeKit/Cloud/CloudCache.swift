@@ -108,6 +108,50 @@ public enum CloudCache {
         return stub
     }
 
+    /// Make a cloud recording workable from a local copy of it instead of the network: its
+    /// trailer stub cut from the local original, and its LRV cloned (APFS clones cost no space).
+    /// The local copy must be the same file (same size as the cloud's original).
+    public static func seed(_ media: CloudMedia, fromLocal original: URL) throws -> URL {
+        let src = try BinaryFile(original)
+        let size = Int64(src.size)
+        if let expected = media.size, expected != size {
+            throw CloudError.badResponse("\(original.lastPathComponent) is \(size) bytes here, \(expected) in the cloud")
+        }
+        let end = try src.read(at: src.size - 72, count: 72)
+        guard end.count == 72 else { throw CloudError.badResponse("short file") }
+        let extra = Int64(end.le(32, as: UInt32.self))
+        let keep = min(size, extra + 65_536)
+        let tail = try src.read(at: UInt64(size - keep), count: Int(keep))
+        let d = dir(media.id)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let stub = d.appendingPathComponent(original.lastPathComponent)
+        let existing = (try? FileManager.default.attributesOfItem(atPath: stub.path)[.size] as? Int64) ?? 0
+        if existing < size { try tail.write(to: stub, options: .atomic) }
+        _ = try InsvFile(url: stub)
+
+        var lrvName: String?, lrvSize: Int64?
+        if let proxy = Clip.findProxy(for: original) {
+            let dest = d.appendingPathComponent(proxy.lastPathComponent)
+            if !FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.copyItem(at: proxy, to: dest) }
+            lrvName = proxy.lastPathComponent
+            lrvSize = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? nil
+        }
+        let record = CloudRecord(mediaId: media.id, name: original.lastPathComponent, size: size, lrvName: lrvName, lrvSize: lrvSize)
+        try JSONEncoder().encode(record).write(to: d.appendingPathComponent("cloud.json"), options: .atomic)
+        return stub
+    }
+
+    /// Fill a stub with a local copy of its original (cloned; same file, so no download).
+    public static func adoptOriginal(_ clipURL: URL, from local: URL) throws {
+        guard let r = record(for: clipURL), isStub(clipURL) else { return }
+        let size = (try? FileManager.default.attributesOfItem(atPath: local.path)[.size] as? Int64) ?? 0
+        guard size == r.size else { throw CloudError.badResponse("\(local.lastPathComponent) doesn't match the cloud original") }
+        let staged = clipURL.deletingLastPathComponent().appendingPathComponent(".\(clipURL.lastPathComponent).part")
+        try? FileManager.default.removeItem(at: staged)
+        try FileManager.default.copyItem(at: local, to: staged)
+        _ = try FileManager.default.replaceItemAt(clipURL, withItemAt: staged)
+    }
+
     /// Replace a clip's trailer stub with the full original (for export).
     public static func downloadOriginal(_ clipURL: URL, client: CloudClient,
                                         progress: @escaping @Sendable (Double) -> Void) async throws {

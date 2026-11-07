@@ -97,6 +97,11 @@ Debug commands: `cloud status`, `cloud list [--raw]`, `cloud probe <name|id>`,
 - Frame rates: the listing's `framerate`/`width` match the trailer (4K 120 = 1920² per lens, 8K 48 =
   3840²); 120 fps clips' LRVs are 29.97 fps, 48 fps clips' 24 fps.
 
+- **Migration** (2026-11-06, `reframe-cli cloud migrate`): the 8 shots saved against
+  `~/Downloads/Insta360 Download` now reference their cloud recordings; the cache was seeded from
+  the local copies (trailer cut, LRV cloned). Reframe no longer opens a folder by default, and the
+  cloud's entry wins over a local duplicate (a local copy feeds fetches and originals instead).
+
 Not done: expired signed URLs mid-download aren't retried; nothing evicts old LRVs; the cloud
 album `create_time` uses this Mac's time zone (Studio's used the camera's).
 

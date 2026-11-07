@@ -26,7 +26,8 @@ need full Xcode; if `xcode-select` points at the Command Line Tools, set
 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (`bundle.sh` does this). The Metal
 shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't needed.
 
-- **Library:** opens `~/Downloads/Insta360 Download` by default (File → Open Footage Folder, ⌘O).
+- **Library:** your Insta360 Cloud recordings, plus a footage folder only if you open one (File →
+  Open Footage Folder, ⌘O; Close Footage Folder to go back to none).
   Each clip shows a levelled 360° thumbnail rendered from its LRV proxy, plus badges for the
   color profile, timelapse, frame rate and how shaky it is (from the gyro).
 - **Viewer:** drag to look, scroll or pinch to zoom, space to play, ←/→ to step a frame.
@@ -53,9 +54,9 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   sheet grouped by recording day (or newest / longest first, filterable by name or clip). Hover a
   card to scrub through the shot; the ticks along its bottom are keyframes. Each card shows the
   length, lens, stabilization, clip and time range, a cloud badge, and a sparkle if it was kept
-  from a suggestion. Click to select (⌘-click, Shift-click, ⌘A for more), double-click or Return
-  to open it in the editor at its in point, Delete to delete (undoable). Rename a shot by clicking
-  the name of a selected card or choosing Rename, or in the inspector's Name field. With shots
+  from a suggestion. Click to select (⌘-click, Shift-click, ⌘A for more); double-click the picture
+  (or Return) to open it in the editor at its in point; Delete to delete (undoable). Double-click a
+  shot's name (or choose Rename) to rename it, or use the inspector's Name field. With shots
   selected, Export exports just those.
 - **Export (⌘E):** ProRes 422 HQ / 422 / LT, 10-bit 4:2:2, at HD, 4K UHD, vertical or square,
   with 24-bit source audio and a time-of-day timecode track. Each frame is rendered straight into
@@ -117,14 +118,17 @@ binary inside the bundle directly can leave the app without a window.
 `REFRAME_SHOTS_SELECT=<n>` to select the first n), `REFRAME_OPEN_SHOT=<i>` (Open in Editor on the
 i-th shot, reports where the viewer lands), `REFRAME_RENAME_TEST=1` (renames the first shot and
 back), `REFRAME_FOCUS_TEST=1` (a click on the viewer and Return must take focus off the inspector's
-Name field), `REFRAME_DEBUG=1` (playback fps and window
+Name field), `REFRAME_GESTURE_TEST=x,y;x,y` (with `REFRAME_BROWSE=shots`: double-clicks the first
+card's name and picture at those points), `REFRAME_DEBUG=1` (playback fps and window
 state to stderr), `REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal
 view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.
 
 ## Insta360 Cloud
 
 Recordings in Insta360 Cloud sit in the sidebar beside the open folder's, on the same days, with a
-cloud badge (a local copy of the same file wins). Connect with the cloud button at the bottom of the
+cloud badge. When the open folder has the same recording, the cloud entry wins (shots always
+reference the cloud); the local copy is used instead of the network to fetch it and as its
+original for export. Connect with the cloud button at the bottom of the
 sidebar: Insta360's own sign-in page opens and you sign in there; Reframe keeps only the session
 token (30 days, renewed automatically).
 
@@ -136,8 +140,10 @@ a cloud clip's context menu). Send to Studio doesn't: it references them as clou
 Studio streams. "Fetch All Cloud Clips" fetches every proxy in the background.
 
 Cache: `~/Library/Application Support/Reframe/Cloud/<mediaId>/`; cloud clips' shots are kept in
-their own store, so they don't depend on the open folder (and move to a local copy once one shows
-up in the folder). This uses the private API Insta360 Studio uses; see [CLOUD.md](CLOUD.md).
+their own store, so they don't depend on the open folder. `reframe-cli cloud migrate [--dry-run]`
+moves shots saved against local files over to the same recordings in the cloud (seeding the cache
+from the local copies, no download), backs up each store it rewrites (`*.json.bak-<time>`), and
+forgets the saved footage folder once nothing in it has shots (quit Reframe first). This uses the private API Insta360 Studio uses; see [CLOUD.md](CLOUD.md).
 `reframe-cli cloud login|status|list|probe|fetch [--original]|logout` drive it from the terminal.
 
 ## Python reference

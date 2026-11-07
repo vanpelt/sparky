@@ -84,8 +84,9 @@ struct ShotsBrowser: View {
                             Section {
                                 ForEach(g.shots) { shot in
                                     ShotCard(shot: shot, selected: selection.contains(shot.id), renaming: $renaming)
-                                        .onTapGesture(count: 2) { library.openInEditor(shot) }
-                                        .onTapGesture { click(shot) }
+                                        // Selection on every click; the card's frame (open) and name
+                                        // (rename) handle double-clicks themselves.
+                                        .simultaneousGesture(TapGesture().onEnded { click(shot) })
                                         .contextMenu { menu(for: shot) }
                                 }
                             } header: {
@@ -101,11 +102,12 @@ struct ShotsBrowser: View {
                     }
                     .padding(.horizontal, 22)
                     .padding(.bottom, 24)
+                    // Clicking between cards clears the selection (behind the cards, not around them,
+                    // so a click on a card never reaches it).
+                    .background { Color.clear.contentShape(Rectangle()).onTapGesture { selection = [] } }
+                    .frame(maxWidth: .infinity, minHeight: 0, alignment: .topLeading)
                 }
                 .background(Color(nsColor: .windowBackgroundColor))
-                // Clicking the background clears the selection.
-                .contentShape(Rectangle())
-                .onTapGesture { selection = [] }
             }
         }
     }
@@ -214,7 +216,7 @@ struct ShotCard: View {
             Rectangle().fill(Theme.surround)
             if let image {
                 Image(decorative: image, scale: 1).resizable().aspectRatio(16 / 9, contentMode: .fill)
-            } else if item == nil {
+            } else if item == nil && !library.loadingCloud && !library.loading {
                 VStack(spacing: 4) {
                     Image(systemName: "questionmark.folder").font(.system(size: 18))
                     Text("Clip not loaded").font(.system(size: 11))
@@ -243,10 +245,11 @@ struct ShotCard: View {
             if let item, item.isCloud { CloudBadge(originalInCloud: item.originalInCloud).padding(6) }
         }
         .overlay {
-            // Hover anywhere across the frame to scrub through the shot.
+            // Hover anywhere across the frame to scrub through the shot; double-click to open it.
             GeometryReader { g in
                 Color.clear
                     .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { library.openInEditor(shot) }
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let p):
@@ -278,9 +281,8 @@ struct ShotCard: View {
             Text(shot.name)
                 .font(Theme.title)
                 .lineLimit(1)
-                // Like Finder: clicking the name of the selected card renames it.
-                .simultaneousGesture(TapGesture().onEnded { if selected { renaming = shot.id } })
-                .help(selected ? "Click to rename" : "")
+                .onTapGesture(count: 2) { renaming = shot.id }
+                .help("Double-click to rename")
         }
     }
 

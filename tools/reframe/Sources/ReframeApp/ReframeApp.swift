@@ -39,6 +39,8 @@ struct ReframeApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open Footage Folder…") { library.chooseFolder() }
                     .keyboardShortcut("o")
+                Button("Close Footage Folder") { library.closeFolder() }
+                    .disabled(library.folder == nil)
                 Button("Choose LUT Folder…") { library.chooseLUTFolder() }
             }
         }

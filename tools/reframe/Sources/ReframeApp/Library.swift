@@ -42,6 +42,8 @@ final class Library {
     var browse: Browse = .clips
     /// A shot to select once its clip is in the viewer ("Open in Editor" from the shots view).
     var shotToOpen: Shot.ID?
+    /// Cached cloud clips are still being added at launch.
+    var loadingCloud = false
     /// Frames across each shot for hover-scrubbing in the shots view (rendered on first hover).
     var shotFrames: [Shot.ID: [CGImage]] = [:]
     @ObservationIgnored private var shotFrameSource: [Shot.ID: Shot] = [:]
@@ -95,11 +97,9 @@ final class Library {
         } else if FileManager.default.fileExists(atPath: lutDefault.path) {
             setLUTFolder(lutDefault, loadNow: true)
         }
-        let footageDefault = home.appendingPathComponent("Downloads/Insta360 Download")
+        // A folder opens only if you chose one (Insta360 Cloud needs none).
         if let path = UserDefaults.standard.string(forKey: Self.folderKey) {
             open(folder: URL(fileURLWithPath: path))
-        } else if FileManager.default.fileExists(atPath: footageDefault.path) {
-            open(folder: footageDefault)
         } else {
             loadShots()
         }
@@ -190,6 +190,18 @@ final class Library {
         if panel.runModal() == .OK, let url = panel.url { open(folder: url) }
     }
 
+    /// Back to no folder: only cloud recordings (and their shots) stay in the library.
+    func closeFolder() {
+        guard folder != nil else { return }
+        scanTask?.cancel()
+        folder = nil
+        UserDefaults.standard.removeObject(forKey: Self.folderKey)
+        if let s = selection, item(for: s.path)?.isCloud != true { selection = nil }
+        items = items.filter(\.isCloud)
+        loading = false
+        loadShots()
+    }
+
     func chooseLUTFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -246,7 +258,6 @@ final class Library {
             await MainActor.run {
                 guard let self else { return }
                 self.loading = false
-                self.adoptLocalCopies()
                 for shot in self.shots { self.refreshThumbnail(for: shot) }
             }
             // Interest analysis for clips not analyzed yet (cached ones were picked up above).
@@ -273,11 +284,31 @@ final class Library {
 
     // MARK: Cloud
 
-    /// Cloud clips fetched earlier open straight from the cache (offline too).
+    /// Cloud clips fetched earlier open straight from the cache (offline too): all of them join
+    /// the library first, then get thumbnails, then analysis (which can take a while).
     private func loadCloudClips() {
+        loadingCloud = true
         Task.detached(priority: .userInitiated) { [weak self] in
+            var added: [ClipItem] = []
             for url in CloudCache.readyClips() {
-                await self?.addCloudClip(url, select: false)
+                guard let clip = try? Clip(url: url) else { continue }
+                let item = ClipItem(clip: clip)
+                added.append(item)
+                await MainActor.run {
+                    guard let self, !self.items.contains(where: { $0.id == url }) else { return }
+                    self.items.append(item)
+                }
+            }
+            await MainActor.run { self?.loadingCloud = false }
+            for item in added {
+                await self?.prepare(item)
+                await MainActor.run {
+                    guard let self else { return }
+                    for shot in self.shots where shot.clipPath == item.id.path { self.refreshThumbnail(for: shot) }
+                }
+            }
+            for item in added where await MainActor.run(body: { item.analysis == nil }) {
+                await self?.analyze(item)
             }
         }
     }
@@ -307,10 +338,20 @@ final class Library {
         MainActor.assumeIsolated {
             guard let m = cloud.media(for: url) else { return }
             Task { [weak self] in
-                guard let self, let fetched = await self.cloud.fetch(m) else { return }
+                guard let self, let fetched = await self.makeAvailable(m) else { return }
                 await self.addCloudClip(fetched, select: false)
             }
         }
+    }
+
+    /// A cloud recording's trailer and LRV, from a local copy in the open folder when there is one
+    /// (no download), else from the cloud.
+    @MainActor private func makeAvailable(_ m: CloudMedia) async -> URL? {
+        if let local = items.first(where: { !$0.isCloud && $0.clip.url.lastPathComponent == m.name }),
+           let url = try? CloudCache.seed(m, fromLocal: local.clip.url) {
+            return url
+        }
+        return await cloud.fetch(m)
     }
 
     /// Fetch every cloud recording not here yet, one at a time.
@@ -319,7 +360,7 @@ final class Library {
             let pending = days.flatMap(\.rows).compactMap { $0.item == nil ? $0.media : nil }
             Task { [weak self] in
                 for m in pending {
-                    guard let self, let url = await self.cloud.fetch(m) else { continue }
+                    guard let self, let url = await self.makeAvailable(m) else { continue }
                     await self.addCloudClip(url, select: false)
                 }
             }
@@ -329,6 +370,13 @@ final class Library {
     /// Download the originals of these cloud clips (export needs full resolution).
     func downloadOriginals(_ clips: [Clip]) async {
         for clip in clips where CloudCache.isStub(clip.url) {
+            // The open folder may hold the same recording: clone it rather than download it.
+            let name = clip.url.lastPathComponent
+            if let local = items.first(where: { !$0.isCloud && $0.clip.url.lastPathComponent == name }),
+               (try? CloudCache.adoptOriginal(clip.url, from: local.clip.url)) != nil {
+                item(for: clip.url.path)?.originalInCloud = false
+                continue
+            }
             let ok = await cloud.downloadOriginal(clip.url)
             if ok, let item = item(for: clip.url.path) { item.originalInCloud = false }
         }
@@ -351,15 +399,16 @@ final class Library {
     }
 
     /// Everything, local and cloud, by recording day (oldest first); within a day by time or by
-    /// interest. A local copy wins over the cloud: same file name means the same recording.
+    /// interest. Same file name means the same recording, and the cloud's entry wins, so shots
+    /// always reference the cloud (a local copy only saves downloading the original).
     @MainActor var days: [(day: Date, rows: [Row])] {
-        let local = Set(items.filter { !$0.isCloud }.map { $0.clip.url.lastPathComponent })
+        let inCloud = Set(cloud.media.map(\.name)).union(items.filter(\.isCloud).map { $0.clip.url.lastPathComponent })
         var rows: [URL: Row] = [:]
-        for m in cloud.media where !local.contains(m.name) {
+        for m in cloud.media {
             let u = cloud.url(for: m)
             rows[u] = Row(id: u, media: m)
         }
-        for item in items where !item.isCloud || !local.contains(item.clip.url.lastPathComponent) {
+        for item in items where item.isCloud || !inCloud.contains(item.clip.url.lastPathComponent) {
             rows[item.id, default: Row(id: item.id)].item = item
         }
         let cal = Calendar.current
@@ -369,23 +418,6 @@ final class Library {
             guard sortByInterest else { return (day, g) }
             return (day, g.sorted { ($0.item?.analysis?.score ?? -1) > ($1.item?.analysis?.score ?? -1) })
         }
-    }
-
-    /// When the open folder holds a recording you'd been editing from the cloud, its shots
-    /// move over to the local file.
-    private func adoptLocalCopies() {
-        let local = Dictionary(items.filter { !$0.isCloud }.map { ($0.clip.url.lastPathComponent, $0.clip.url.path) },
-                               uniquingKeysWith: { a, _ in a })
-        var changed = false
-        let moved = shots.map { s -> Shot in
-            guard CloudCache.isCloud(URL(fileURLWithPath: s.clipPath)),
-                  let path = local[URL(fileURLWithPath: s.clipPath).lastPathComponent] else { return s }
-            var t = s
-            t.clipPath = path
-            changed = true
-            return t
-        }
-        if changed { shots = moved }
     }
 
     /// Run (or load) the interest analysis, then move the thumbnail to the best moment.

@@ -76,6 +76,40 @@ func runCloud(_ args: [String]) async {
                 say("original: \(gb(size)) in \(ms(Date().timeIntervalSince(t1))), stub \(CloudCache.isStub(url))")
             }
 
+        case "migrate":  // point saved shots at cloud recordings instead of local files
+            let dry = rest.contains("--dry-run")
+            let c = try CloudClient.signedIn()
+            let media = try await c.listAll().filter(\.isVideo)
+            let plan = try CloudMigration.plan(media: media)
+            for mv in plan.moves {
+                let source = mv.cached ? "already cached" : mv.localCopy ? "seed from local copy" : "fetch from cloud"
+                say("  move  \(mv.shot) of \(URL(fileURLWithPath: mv.from).lastPathComponent)  (\(source))")
+            }
+            for u in plan.unmatched { say("  keep  \(u.shot) of \(u.file)  (not in the cloud)") }
+            say("\(plan.moves.count) shot\(plan.moves.count == 1 ? "" : "s") to move, \(plan.unmatched.count) staying local")
+            let folderKey = "footageFolder" as CFString, app = "dev.sparky.reframe" as CFString
+            let savedFolder = CFPreferencesCopyAppValue(folderKey, app) as? String
+            let folderStore = savedFolder.map { ShotStore.url(for: URL(fileURLWithPath: $0)).standardizedFileURL }
+            let folderKeepsShots = plan.unmatched.contains { $0.store.standardizedFileURL == folderStore }
+            if dry {
+                if let savedFolder {
+                    say(folderKeepsShots ? "the saved footage folder (\(savedFolder)) stays: it still has local-only shots"
+                        : "would forget the saved footage folder (\(savedFolder)), so Reframe opens without one")
+                }
+                say("dry run: nothing changed")
+                break
+            }
+            if !NSRunningApplication.runningApplications(withBundleIdentifier: "dev.sparky.reframe").isEmpty {
+                fail("Quit Reframe first: it would save its old shot list over the migrated one.")
+            }
+            let backups = try await CloudMigration.run(media: media, client: c, log: say)
+            for b in backups { say("backup: \(b.path)") }
+            if let savedFolder, !folderKeepsShots {
+                CFPreferencesSetAppValue(folderKey, nil, app)
+                CFPreferencesAppSynchronize(app)
+                say("forgot the saved footage folder (\(savedFolder)); open one again with ⌘O")
+            }
+
         case "get":  // debug: reframe-cli cloud get <host> <path> [key=value ...] (output redacted)
             guard rest.count >= 2 else { fail("usage: reframe-cli cloud get <host> <path> [k=v ...]") }
             var q: [String: String] = [:]
