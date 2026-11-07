@@ -83,10 +83,70 @@ swift build -c release --product reframe-cli
 .build/release/reframe-cli search "curtains" clip.insv --raw  # raw cosines and percentiles, for calibrating
 ```
 
-## Next
+## Better suggestions from the same embeddings
 
-- Fold indexing into `ProxyScan` (it already renders world-locked views for the face detector)
-  so analysis decodes the proxy once.
+The index already says what is in every direction every second, so the interest map can use it
+without new models. First measurement, `reframe-cli evaluate-aim cloud`: for the 10 shots kept so
+far (208 samples, every 0.5 s), how far each signal's strongest heading is from where you aimed:
+
+| Signal | Mean error | Within 30° | Within 60° |
+| --- | --- | --- | --- |
+| Camera forward (baseline) | 83° | 27% | 50% |
+| Interest map without CLIP | 63° | 42% | 56% |
+| Appeal alone (zero-shot "worth filming" minus "junk" prompts) | 76° | 27% | 49% |
+| Taste (leave-one-out average of your other shots' views) | 92° | 17% | 32% |
+| Interest + appeal, z-scored (the experiment) | 57° | 44% | 60% |
+| **Interest map with `.appeal` and `.dull` (shipped)** | **56°** | **48%** | **63%** |
+
+Small and biased (all ten started as suggestions the interest map aimed). Per shot, the shipped
+channels fix two big misses (Tundra 70° → 11°, VID_004 56° → 32°), leave six about where they
+were (VID_009 stays at 16°), and cost one (VID_016 21° → 36°). VID_077 shot 2 is still 147° off:
+the z-scored blend got it to 42°, the weighted sum doesn't, because interest there is strong in
+the wrong direction. Taste is worse than chance with ten picks: "people in the desert" is
+everywhere.
+
+### What's in (steps 1 and 2)
+
+- **One decode.** `ProxyScan` renders the eight CLIP views alongside the face-detector views
+  and embeds them on a queue of its own when the model is installed and search is on
+  (`Analyzer.useSemantic`, synced from Settings › Search). The index it writes matches a
+  separately built one (cosine ≥ 0.9997 per view). On a 2-minute clip analysis goes from 3.1 s
+  to 3.7 s; indexing separately was another ~3.8 s and a second decode.
+- **`.appeal`** (directional, `Semantic/SemanticSignals.swift`): per view, the cosine to the
+  mean of ten "things people film" prompts minus the mean of ten junk prompts; then relative to
+  that moment's median heading (0.04 above it is full scale: the 90th percentile here), so every
+  moment has a best direction and nothing floods; then `persistentDamped` like faces, so your
+  own face on the stick doesn't always win.
+- **`.dull`**: views where the junk prompts win outright (margin below 0, full at −0.04). Not
+  damped: the roll cage being in every frame is why the path should stay off it.
+- **Weights**: appeal 0.3 / dull −0.3 in Blend (a sweep: 0.3/−0.3 had the most within 30°;
+  0.5 helps the mean, 0.8+ starts overriding faces), 0.2 People, 0.25 Action, 0.6 / −0.45
+  Scenery. Dull alone changes nothing (it's rarely where interest points); with appeal it helps a
+  little.
+- **Prompts** are generic outdoor categories ("a scenic view of mountains or canyons", "a vehicle
+  driving off-road", "a dramatic sky"): the trip-specific wording ("red rock canyons", "the
+  desert") scored the same, and fully generic wording ("a person doing a sport") a bit worse
+  (60° / 45%).
+- **No re-analysis needed**: analyses made before a clip had an index gain the channels when
+  next loaded (two matrix-vector products over the mapped index, ~0.1 s), and a clip indexed in
+  the background updates in place. `SemanticSignals.version` re-derives them when prompts change.
+- **`evaluate cloud`**: the kept suggestions rank higher in their clips (mean rank 3.3 → 2.7; in
+  the top 3: 6 → 7 of 10; Catan #6 → #2, Tundra #7 → #5; VID_077 shot 1 #2 → #3).
+
+### Next
+
+3. **Directional novelty**: embedding change per heading versus the previous 3–12 s, replacing
+   the time-only colour-histogram novelty ("arriving somewhere new", and where).
+4. **Titles**: classify each suggestion's peak view against a ~100-label vocabulary ("Waterfall",
+   "Group photo", "Off-roading", "Board game") instead of "Faces, laughter". The same text could
+   feed Core Spotlight later.
+5. **Diversity**: rank library-wide suggestions with MMR on their peak-view embeddings, so five
+   near-identical canyon shots don't fill the top.
+6. **Taste, later**: once there are ~50 kept shots and some dismissals, a linear probe on kept vs
+   dismissed views (a per-user weight vector, re-ranked like presets, not baked into the cache).
+
+## Also next
+
 - Calibrate the floor on more footage (it's from ~20 queries over 17 clips), and try
   MobileCLIP2 (better retrieval; would need a Core ML conversion).
-- Use the same vectors for library-wide de-duplication and "more like this shot".
+- Use the same vectors for "more like this shot".

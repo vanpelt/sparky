@@ -16,6 +16,7 @@ final class FootageSearch {
         didSet {
             guard isEnabled != oldValue else { return }
             UserDefaults.standard.set(isEnabled, forKey: "search.enabled")
+            syncAnalyzer()
             if isEnabled {
                 if modelState == .notInstalled || modelState.failure != nil { downloadModels() }
                 startIndexing()
@@ -31,8 +32,14 @@ final class FootageSearch {
         case notInstalled, downloading(Double), ready, failed(String)
         var failure: String? { if case .failed(let s) = self { return s } else { return nil } }
     }
-    private(set) var modelState: ModelState = SemanticModels.isInstalled ? .ready : .notInstalled
+    private(set) var modelState: ModelState = SemanticModels.isInstalled ? .ready : .notInstalled {
+        didSet { syncAnalyzer() }
+    }
     var isReady: Bool { isEnabled && modelState == .ready }
+
+    /// While search is on, analysis also uses the model: it builds a clip's index in the same
+    /// decode and adds the appeal channels that help aim suggestions (SEMANTIC.md).
+    private func syncAnalyzer() { Analyzer.useSemantic = isReady }
 
     // MARK: Index
 
@@ -42,6 +49,9 @@ final class FootageSearch {
     private(set) var indexing: URL?
     private(set) var remaining = 0
     private var failedToIndex: Set<URL> = []
+    /// Clips whose analysis finished (or failed). Until then they're left to it: with search on,
+    /// it builds the index in its own decode of the proxy.
+    private var analysisDone: Set<URL> = []
     private var loaded: [URL: SemanticIndex] = [:]
 
     // MARK: Query
@@ -72,6 +82,7 @@ final class FootageSearch {
 
     /// At launch: with search on, finish (or redo) a model download that didn't complete.
     func start() {
+        syncAnalyzer()
         if isEnabled, modelState != .ready { downloadModels() }
     }
 
@@ -129,11 +140,23 @@ final class FootageSearch {
         guard let library else { return nil }
         let todo = library.items.filter {
             !indexed.contains($0.id) && !failedToIndex.contains($0.id) && $0.clip.proxyURL != nil && $0.clip.motion != nil
+                && ($0.analysis != nil || analysisDone.contains($0.id))
         }
         remaining = todo.count
         // The clip you're looking at first, then newest first (what you just shot).
         return todo.first { $0.id == library.selection }
             ?? todo.max { ($0.clip.captureDate ?? .distantPast) < ($1.clip.captureDate ?? .distantPast) }
+    }
+
+    /// The library finished a clip's analysis (or gave up): pick up the index it built, if it
+    /// did, or index the clip separately.
+    func analysisFinished(_ item: ClipItem) {
+        analysisDone.insert(item.id)
+        if !indexed.contains(item.id), SemanticIndexer.isIndexed(item.clip) {
+            indexed.insert(item.id)
+            if isActive { scheduleQuery(debounce: false) }
+        }
+        startIndexing()
     }
 
     func startIndexing() {
@@ -146,6 +169,7 @@ final class FootageSearch {
                 if let index {
                     self.loaded[item.id] = index
                     self.indexed.insert(item.id)
+                    self.library?.semanticIndexed(item, index: index)
                     if self.isActive, let q = self.embedding { self.add(item, index: index, query: q) }
                 } else {
                     self.failedToIndex.insert(item.id)
@@ -393,29 +417,80 @@ struct SearchOffRow: View {
     }
 }
 
-/// Below search results: what isn't searched yet.
+/// Below search results: clips that can't be searched because they're only in Insta360 Cloud.
+/// (Progress lives in BackgroundActivity, so this doesn't come and go while clips are fetched.)
 struct SearchStatusRow: View {
     @Environment(Library.self) private var library
 
     var body: some View {
-        let search = library.search
         let cloudOnly = max(library.cloud.media.count - library.items.filter(\.isCloud).count, 0)
-        if search.indexing != nil || cloudOnly > 0 {
+        if cloudOnly > 0, library.fetchAll == nil {
             Section {
-                if search.indexing != nil {
-                    HStack(spacing: 7) {
-                        ProgressView().controlSize(.mini)
-                        Text("Indexing \(search.remaining) more clip\(search.remaining == 1 ? "" : "s")…").caption()
-                    }
-                }
-                if cloudOnly > 0 {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("\(cloudOnly) clip\(cloudOnly == 1 ? " is" : "s are") only in Insta360 Cloud, so not searched yet.")
-                            .caption().lineLimit(6).fixedSize(horizontal: false, vertical: true)
-                        Button("Fetch All Cloud Clips") { library.fetchAllCloudClips() }.controlSize(.small)
-                    }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(cloudOnly) clip\(cloudOnly == 1 ? " is" : "s are") only in Insta360 Cloud, so not searched yet.")
+                        .caption().lineLimit(6).fixedSize(horizontal: false, vertical: true)
+                    Button("Fetch All Cloud Clips") { library.fetchAllCloudClips() }.controlSize(.small)
                 }
             }
         }
+    }
+}
+
+/// One steady line above the sidebar's bottom bar while Reframe works in the background (fetching
+/// cloud clips, indexing them for search). It stays up across the gaps between clips, and a click
+/// opens Settings › Search for the details.
+struct BackgroundActivity: View {
+    @Environment(Library.self) private var library
+    @Environment(\.openSettings) private var openSettings
+    /// Kept up for a moment after the work stops, so back-to-back jobs read as one.
+    @State private var shown = false
+
+    private var busy: Bool { library.fetchAll != nil || library.search.indexing != nil }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: 0)  // keeps the view (and its task) alive while hidden
+            if shown {
+                Button {
+                    UserDefaults.standard.set(SettingsView.Tab.search.rawValue, forKey: "settings.tab")
+                    openSettings()
+                } label: {
+                    HStack(spacing: 8) {
+                        if let f = library.fetchAll {
+                            ProgressView(value: Double(f.done), total: Double(max(f.total, 1)))
+                                .progressViewStyle(.circular).controlSize(.mini)
+                        } else {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Text(summary).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .help("Show progress in Settings › Search")
+                .transition(.opacity)
+                Divider()
+            }
+        }
+        .task(id: busy) {
+            if busy { withAnimation { shown = true } }
+            else {
+                try? await Task.sleep(for: .seconds(2.5))
+                if !Task.isCancelled { withAnimation { shown = false } }
+            }
+        }
+    }
+
+    private var summary: String {
+        if let f = library.fetchAll {
+            return "Fetching cloud clips · \(f.done) of \(f.total)"
+        }
+        let n = library.search.remaining
+        if library.search.indexing != nil { return n > 1 ? "Indexing for search · \(n) clips left" : "Indexing for search…" }
+        return "Up to date"
     }
 }

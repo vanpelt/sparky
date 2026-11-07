@@ -7,6 +7,8 @@ public enum Signal: String, CaseIterable, Codable, Sendable {
     case faces, people, motion, salience
     /// Matches a typed search (MobileCLIP, Semantic/SemanticIndex.swift); only set while searching.
     case query
+    /// MobileCLIP zero-shot: a view worth filming vs. one that's junk (Semantic/SemanticSignals.swift).
+    case appeal, dull
     // Audio
     case loudness, onset, laughter, cheering, shouting, speech, music, wind
     // Camera motion (IMU)
@@ -24,6 +26,8 @@ public enum Signal: String, CaseIterable, Codable, Sendable {
         case .motion: return "movement"
         case .salience: return "stands out"
         case .query: return "matches search"
+        case .appeal: return "looks good"
+        case .dull: return "dull view"
         case .novelty: return "new scenery"
         case .loudness: return "loud"
         case .onset: return "sudden sounds"
@@ -44,7 +48,12 @@ public enum Signal: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    public var isDirectional: Bool { self == .faces || self == .people || self == .motion || self == .salience || self == .query }
+    public var isDirectional: Bool {
+        switch self {
+        case .faces, .people, .motion, .salience, .query, .appeal, .dull: return true
+        default: return false
+        }
+    }
 
     public var isAudio: Bool {
         switch self {
@@ -69,6 +78,7 @@ public struct InterestWeights: Codable, Sendable, Hashable {
     public static func preset(_ p: Preset) -> InterestWeights {
         var w: [Signal: Double] = [
             .faces: 0.8, .people: 0.35, .motion: 0.5, .salience: 0.2, .novelty: 0.4,
+            .appeal: 0.3, .dull: -0.3,
             .laughter: 1.0, .cheering: 0.9, .shouting: 0.7, .speech: 0.2, .music: 0.1,
             .loudness: 0.35, .onset: 0.25,
             .jump: 0.9, .impact: 0.35, .turn: 0.2, .calm: 0.08,
@@ -79,15 +89,16 @@ public struct InterestWeights: Codable, Sendable, Hashable {
         case .people:
             w[.faces] = 1.1; w[.people] = 0.5; w[.motion] = 0.3; w[.salience] = 0.1; w[.novelty] = 0.2
             w[.laughter] = 1.2; w[.speech] = 0.6; w[.cheering] = 1.0
-            w[.jump] = 0.4; w[.impact] = 0.15; w[.loudness] = 0.25
+            w[.jump] = 0.4; w[.impact] = 0.15; w[.loudness] = 0.25; w[.appeal] = 0.2
         case .action:
             w[.motion] = 0.9; w[.faces] = 0.5; w[.salience] = 0.1; w[.novelty] = 0.3
             w[.jump] = 1.2; w[.impact] = 0.6; w[.onset] = 0.45; w[.loudness] = 0.5
-            w[.speech] = 0.1; w[.shake] = -0.25
+            w[.speech] = 0.1; w[.shake] = -0.25; w[.appeal] = 0.25
         case .scenery:
             w[.faces] = 0.3; w[.people] = 0.15; w[.motion] = 0.3; w[.salience] = 0.7; w[.novelty] = 0.9
             w[.calm] = 0.5; w[.turn] = 0.35; w[.speech] = 0.0; w[.loudness] = 0.05; w[.onset] = 0.0
             w[.laughter] = 0.4; w[.cheering] = 0.4; w[.jump] = 0.3; w[.shake] = -0.7
+            w[.appeal] = 0.6; w[.dull] = -0.45
         }
         return InterestWeights(w)
     }

@@ -237,6 +237,11 @@ struct ContentView: View {
     private func debugHooks() async {
         let env = ProcessInfo.processInfo.environment
         if env["REFRAME_SEARCH_ON"] != nil { library.search.isEnabled = true }
+        // REFRAME_FETCH_ALL=<n>: Fetch All Cloud Clips, stopping after n (tests its progress).
+        if let n = env["REFRAME_FETCH_ALL"].flatMap(Int.init) {
+            for _ in 0..<100 where library.cloud.media.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+            library.fetchAllCloudClips(limit: n)
+        }
         if let q = env["REFRAME_SEARCH"] {
             library.search.text = q
             for _ in 0..<100 where library.search.resultsQuery != q { try? await Task.sleep(for: .milliseconds(100)) }
@@ -531,6 +536,8 @@ struct Sidebar: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 0) {
+            BackgroundActivity()
             HStack {
                 Button { library.chooseFolder() } label: {
                     Label(library.folder?.lastPathComponent ?? "Open Folder…", systemImage: "folder")
@@ -557,6 +564,7 @@ struct Sidebar: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
+            }
         }
     }
 }

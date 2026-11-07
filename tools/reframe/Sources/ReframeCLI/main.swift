@@ -10,6 +10,7 @@ import simd
 //   reframe-cli analyze <file.insv | folder>... [--json] [--no-cache] [--preset blend|people|action|scenery]
 //                       [--heat] [--stills dir [--lut file.cube]]
 //   reframe-cli evaluate <footage folder> [--preset P] [--json]   (scores suggestions against your shots)
+//   reframe-cli evaluate-aim <footage folder | cloud>   (where signals would aim vs. where you aimed)
 //   reframe-cli models [status|install|remove]
 //   reframe-cli index <file.insv | folder | cloud>... [--no-cache]     (MobileCLIP embeddings, SEMANTIC.md)
 //   reframe-cli search "<query>" <file.insv | folder | cloud>... [--limit N] [--stills dir] [--shots] [--raw]
@@ -305,6 +306,10 @@ case "evaluate":
         }
         for id in c.dismissedStillTop3 { print("  \(c.clip) dismissed \(id) is still in the top 3") }
     }
+
+case "evaluate-aim":
+    guard let path = args.first else { fail("evaluate-aim <footage folder | cloud>") }
+    try await evaluateAim(path == "cloud" ? CloudCache.root : URL(fileURLWithPath: path))
 
 case "models":
     // reframe-cli models [status|install|remove]: the visual search models (SEMANTIC.md).

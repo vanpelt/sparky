@@ -374,17 +374,37 @@ final class Library {
     }
 
     /// Fetch every cloud recording not here yet, one at a time.
-    func fetchAllCloudClips() {
+    /// Progress of Fetch All Cloud Clips, while it runs.
+    struct BatchProgress: Equatable {
+        var done = 0
+        var total: Int
+        var current: String?
+    }
+    var fetchAll: BatchProgress?
+    @ObservationIgnored private var fetchAllTask: Task<Void, Never>?
+
+    func fetchAllCloudClips(limit: Int? = nil) {
         MainActor.assumeIsolated {
-            let pending = days.flatMap(\.rows).compactMap { $0.item == nil ? $0.media : nil }
-            Task { [weak self] in
+            guard fetchAllTask == nil else { return }
+            var pending = days.flatMap(\.rows).compactMap { $0.item == nil ? $0.media : nil }
+            if let limit { pending = Array(pending.prefix(limit)) }
+            guard !pending.isEmpty else { return }
+            fetchAll = BatchProgress(total: pending.count)
+            fetchAllTask = Task { [weak self] in
                 for m in pending {
-                    guard let self, let url = await self.makeAvailable(m) else { continue }
-                    await self.addCloudClip(url, select: false)
+                    guard let self, !Task.isCancelled else { break }
+                    self.fetchAll?.current = m.name
+                    if let url = await self.makeAvailable(m) { await self.addCloudClip(url, select: false) }
+                    self.fetchAll?.done += 1
                 }
+                self?.fetchAll = nil
+                self?.fetchAllTask = nil
             }
         }
     }
+
+    /// Stops after the clip being fetched now.
+    func stopFetchingAll() { fetchAllTask?.cancel() }
 
     /// Download the originals of these cloud clips (export needs full resolution).
     func downloadOriginals(_ clips: [Clip]) async {
@@ -472,10 +492,23 @@ final class Library {
 
     /// Run (or load) the interest analysis, then move the thumbnail to the best moment.
     private func analyze(_ item: ClipItem) async {
-        guard let a = try? await Analyzer.analyze(item.clip, weights: weights) else { return }
+        let a = try? await Analyzer.analyze(item.clip, weights: weights)
+        await MainActor.run { self.search.analysisFinished(item) }
+        guard let a else { return }
         await MainActor.run { self.apply(a, to: item) }
         if let image = await renderClipThumbnail(item, at: a.bestMoment) {
             await MainActor.run { item.thumbnail = image }
+        }
+    }
+
+    /// A clip just got its semantic index in the background: add the appeal channels to its
+    /// analysis (and re-rank its suggestions) without re-analyzing.
+    @MainActor func semanticIndexed(_ item: ClipItem, index: SemanticIndex) {
+        guard let a = item.analysis, !a.hasSemanticSignals else { return }
+        let clip = item.clip
+        Task.detached(priority: .utility) { [weak self] in
+            guard let b = Analyzer.adding(index, to: a, clip: clip) else { return }
+            await MainActor.run { self?.apply(b, to: item) }
         }
     }
 

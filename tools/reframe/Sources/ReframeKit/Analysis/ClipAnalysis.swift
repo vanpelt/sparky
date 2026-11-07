@@ -26,6 +26,8 @@ public struct ClipAnalysis: Codable, Sendable {
     public var bestMoment: Double
     /// Seconds spent per stage.
     public var timings: [String: Double]
+    /// `SemanticSignals.version` of the `.appeal`/`.dull` channels, nil without them.
+    public var semanticVersion: Int? = nil
 
     /// Interest over time: time-only signals plus the best direction's interest at each moment.
     public func fused(_ w: InterestWeights? = nil) -> [Float] {
@@ -91,12 +93,37 @@ public enum Analyzer {
     /// The analysis renderer (no LUT: detectors see the camera's own encoding).
     static let renderer = try? ReframeRenderer()
 
-    /// A cached analysis, if one is current (no work otherwise).
+    /// Use MobileCLIP when it's installed: build the clip's semantic index during the proxy scan
+    /// (if there isn't one) and derive the appeal channels from it. The app turns this off while
+    /// search is off; without the models it's a no-op either way.
+    nonisolated(unsafe) public static var useSemantic = true
+
+    static var semanticEncoder: CLIPEncoder? {
+        guard useSemantic, SemanticModels.isInstalled else { return nil }
+        return try? CLIPEncoder.shared()
+    }
+
+    /// A cached analysis, if one is current (no work otherwise, beyond adding the appeal channels
+    /// to one made before the clip had a semantic index, if it has one now).
     public static func cached(_ clip: Clip, weights: InterestWeights = .default) -> ClipAnalysis? {
-        guard let data = try? Data(contentsOf: cacheURL(for: clip)),
-              let a = try? JSONDecoder().decode(ClipAnalysis.self, from: data), a.version == ClipAnalysis.currentVersion
+        let url = cacheURL(for: clip)
+        guard let data = try? Data(contentsOf: url),
+              var a = try? JSONDecoder().decode(ClipAnalysis.self, from: data), a.version == ClipAnalysis.currentVersion
         else { return nil }
+        if !a.hasSemanticSignals, a.heading != nil, let index = SemanticIndexer.cached(clip), let encoder = semanticEncoder,
+           let b = try? a.addingSemanticSignals(index, encoder: encoder) {
+            a = b.weights == weights ? b : b.reweighted(weights)
+            try? JSONEncoder().encode(a).write(to: url, options: .atomic)
+        }
         return a.weights == weights ? a : a.reweighted(weights)
+    }
+
+    /// Adds the appeal channels to an analysis from a just-built index (and saves it).
+    public static func adding(_ index: SemanticIndex, to a: ClipAnalysis, clip: Clip) -> ClipAnalysis? {
+        guard !a.hasSemanticSignals, a.heading != nil, let encoder = semanticEncoder,
+              let b = try? a.addingSemanticSignals(index, encoder: encoder) else { return nil }
+        try? JSONEncoder().encode(b).write(to: cacheURL(for: clip), options: .atomic)
+        return b
     }
 
     public static func analyze(_ clip: Clip, weights: InterestWeights = .default, useCache: Bool = true) async throws -> ClipAnalysis {
@@ -115,11 +142,15 @@ public enum Analyzer {
             let s = try await AudioAnalysis.decodeMono(url: url)
             return (s, Date().timeIntervalSince(t0))
         }()
+        // The semantic index rides along with the proxy scan unless it's already built.
+        let existingIndex = SemanticIndexer.cached(clip)
+        let encoder = semanticEncoder
         async let scanTask: (ProxyScan.Result, Double) = {
             let t0 = Date()
             guard let proxy, let renderer else { return (ProxyScan.Result(), 0) }
             var scan = ProxyScan()
             if clip.info.isTimelapse { scan.detectorRate = 0.5 }
+            if existingIndex == nil, clip.motion != nil { scan.encoder = encoder }
             let r = (try? await scan.run(clip: clip, proxy: proxy, renderer: renderer)) ?? ProxyScan.Result()
             return (r, Date().timeIntervalSince(t0))
         }()
@@ -158,10 +189,20 @@ public enum Analyzer {
             heading = DirectionalAnalysis.build(scan, spin: spin, forward: forward, time: grid)
             timings["directional"] = Date().timeIntervalSince(t0)
         }
+        var semanticVersion: Int?
+        if let index = existingIndex ?? scan.semantic.map({ SemanticIndexer.store($0, for: clip) }),
+           let encoder, heading != nil {
+            t0 = Date()
+            if (try? SemanticSignals.apply(index, to: &heading!, forward: forward, encoder: encoder)) != nil {
+                semanticVersion = SemanticSignals.version
+            }
+            timings["semantic signals"] = Date().timeIntervalSince(t0)
+        }
 
         var a = ClipAnalysis(clipName: clip.name, duration: duration, hasAudio: !(samples ?? []).isEmpty, signals: grid,
                              heading: heading, detections: scan.detections, forward: forward,
-                             spin: spin, weights: weights, suggestions: [], score: 0, bestMoment: 0, timings: timings)
+                             spin: spin, weights: weights, suggestions: [], score: 0, bestMoment: 0, timings: timings,
+                             semanticVersion: semanticVersion)
         t0 = Date()
         a = a.reweighted(weights)
         a.timings["suggest"] = Date().timeIntervalSince(t0)

@@ -9,7 +9,9 @@ import Vision
 ///   `sceneryRate` turned into spectral-residual salience per heading and a horizon colour
 ///   histogram (for novelty);
 /// - six world-locked horizon views at `detectorRate`, run through Vision's face and
-///   human detectors on the Neural Engine.
+///   human detectors on the Neural Engine;
+/// - with an `encoder`, the semantic index's eight 90° views at `SemanticIndexer.rate`, embedded
+///   by MobileCLIP (so search indexing doesn't need a decode of its own).
 /// Views are rendered in the heading grid's frame (Lock stabilization at the clip's first frame),
 /// so the scene stands still and anything that changes is really moving.
 struct ProxyScan {
@@ -25,6 +27,8 @@ struct ProxyScan {
     /// Motion equirect: rendered at 4× and box-filtered down to `motionWidth` × `motionWidth/2`
     /// (a power of two, for the salience FFT).
     var motionWidth = 128
+    /// Builds the clip's semantic index in the same pass when set.
+    var encoder: CLIPEncoder?
 
     struct Result {
         var pictures: [PictureAnalysis.Sample] = []
@@ -38,6 +42,7 @@ struct ProxyScan {
         /// 4×4×4 RGB histogram of the horizon band (sums to 1).
         var histogramTimes: [Double] = []
         var histograms: [[Float]] = []
+        var semantic: SemanticIndex?
         var timings: [String: Double] = [:]
     }
 
@@ -70,6 +75,11 @@ struct ProxyScan {
         visionQueue.maxConcurrentOperationCount = 3
         let lock = NSLock()
         var detections: [Detection] = []
+        // MobileCLIP batches go through one queue of their own (the Neural Engine runs one at a time).
+        let embedQueue = OperationQueue()
+        embedQueue.maxConcurrentOperationCount = 1
+        var semantic: [(Double, [[Float]])] = []
+        var nextSemantic = 0.0, tSemantic = 0.0, embedFailed = false
 
         var nextPicture = 0.0, nextMotion = 0.0, nextDetect = 0.0
         var prevMotion: [Float]?
@@ -116,13 +126,34 @@ struct ProxyScan {
                 }
                 nextDetect = max(nextDetect + 1 / detectorRate, t + 0.5 / detectorRate)
             }
+            if let encoder, t >= nextSemantic {
+                let c0 = Date()
+                if let views = SemanticIndexer.views(f, clip: clip, motion: motion, renderer: renderer) {
+                    // Don't let rendered views pile up (2 MB a sample) if the encoder falls behind.
+                    while embedQueue.operationCount > 3 { usleep(2_000) }
+                    embedQueue.addOperation {
+                        let v = try? encoder.embed(images: views)
+                        lock.withLock { if let v { semantic.append((t, v)) } else { embedFailed = true } }
+                    }
+                }
+                tSemantic += Date().timeIntervalSince(c0)
+                let r = SemanticIndexer.rate
+                nextSemantic = max(nextSemantic + 1 / r, t + 0.5 / r)
+            }
             clock = Date()
         }
         let c0 = Date()
         visionQueue.waitUntilAllOperationsAreFinished()
+        let c1 = Date()
+        embedQueue.waitUntilAllOperationsAreFinished()
         result.detections = detections.sorted { $0.time < $1.time }
+        if encoder != nil, !embedFailed, !semantic.isEmpty {
+            result.semantic = SemanticIndexer.assemble(clip: clip, samples: semantic,
+                                                       timings: ["render": tSemantic, "embed wait": Date().timeIntervalSince(c1)])
+        }
         result.timings = ["decode": tDecode, "motion frames": tMotion, "salience": tScenery, "detector views": tRender,
-                          "vision wait": Date().timeIntervalSince(c0)]
+                          "semantic views": tSemantic, "vision wait": c1.timeIntervalSince(c0),
+                          "embed wait": Date().timeIntervalSince(c1)]
         return result
     }
 

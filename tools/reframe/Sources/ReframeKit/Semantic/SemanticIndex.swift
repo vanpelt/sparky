@@ -308,18 +308,12 @@ public enum SemanticIndexer {
                 catch { cont.resume(throwing: error) }
             }
         }
-        let url = cacheURL(for: clip)
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? index.write(to: url)
-        return SemanticIndex.read(url) ?? index
+        return store(index, for: clip)
     }
 
     private static func build(clip: Clip, motion: Motion, reader: FrameReader, renderer: ReframeRenderer,
                               encoder: CLIPEncoder) throws -> SemanticIndex {
-        let size = CLIPEncoder.imageSize, D = CLIPEncoder.dimension
-        let yaws = (0..<viewCount).map { -180 + Double($0) * 360 / Double(viewCount) }
-        var times: [Double] = [], data = Data()
-        data.reserveCapacity(Int(clip.duration * rate + 2) * viewCount * D * 2)
+        var samples: [(Double, [[Float]])] = []
         var next = 0.0, tDecode = 0.0, tRender = 0.0, tEmbed = 0.0
         let seq = try reader.sequence(from: 0)
         defer { seq.cancel() }
@@ -328,32 +322,56 @@ public enum SemanticIndexer {
             tDecode += Date().timeIntervalSince(clock)
             if f.time >= next {
                 let c0 = Date()
-                let buffers: [CVPixelBuffer] = yaws.compactMap { yaw in
-                    var view = ViewSettings()
-                    view.projection = .flat
-                    view.hfov = fov
-                    view.distortion = 0
-                    view.bodyFromCamera = motion.bodyFromCamera(at: f.time, mode: .lock, smoothing: 0, lockTime: 0,
-                                                                yaw: yaw, pitch: 0, roll: 0)
-                    return renderer.renderRGBA8(frames: f, rig: clip.rig, view: view, width: size, height: size)
-                        .flatMap { CLIPEncoder.pixelBuffer(rgba: $0, size: size, autoLevel: true) }
-                }
+                let buffers = views(f, clip: clip, motion: motion, renderer: renderer)
                 let c1 = Date()
                 tRender += c1.timeIntervalSince(c0)
-                if buffers.count == yaws.count {
-                    for v in try encoder.embed(images: buffers) {
-                        v.map { Float16($0) }.withUnsafeBufferPointer { data.append(Data(buffer: $0)) }
-                    }
-                    times.append(f.time)
-                }
+                if let buffers { samples.append((f.time, try encoder.embed(images: buffers))) }
                 tEmbed += Date().timeIntervalSince(c1)
                 next = max(next + 1 / rate, f.time + 0.5 / rate)
             }
             clock = Date()
         }
-        return SemanticIndex(clipName: clip.name, duration: clip.duration, times: times, yaws: yaws, fov: fov,
-                             dimension: D, vectors: data,
-                             timings: ["decode": tDecode, "render": tRender, "embed": tEmbed])
+        return assemble(clip: clip, samples: samples, timings: ["decode": tDecode, "render": tRender, "embed": tEmbed])
+    }
+
+    /// View centres: `viewCount` evenly around the horizon from -180°.
+    public static var yaws: [Double] { (0..<viewCount).map { -180 + Double($0) * 360 / Double(viewCount) } }
+
+    /// The world-locked horizon views of one frame, ready for the image encoder (nil if any failed).
+    static func views(_ f: LensFrames, clip: Clip, motion: Motion, renderer: ReframeRenderer) -> [CVPixelBuffer]? {
+        let size = CLIPEncoder.imageSize
+        let out: [CVPixelBuffer] = yaws.compactMap { yaw in
+            var view = ViewSettings()
+            view.projection = .flat
+            view.hfov = fov
+            view.distortion = 0
+            view.bodyFromCamera = motion.bodyFromCamera(at: f.time, mode: .lock, smoothing: 0, lockTime: 0,
+                                                        yaw: yaw, pitch: 0, roll: 0)
+            return renderer.renderRGBA8(frames: f, rig: clip.rig, view: view, width: size, height: size)
+                .flatMap { CLIPEncoder.pixelBuffer(rgba: $0, size: size, autoLevel: true) }
+        }
+        return out.count == viewCount ? out : nil
+    }
+
+    /// An index from (time, one unit vector per view) samples, in any order.
+    static func assemble(clip: Clip, samples: [(Double, [[Float]])], timings: [String: Double]) -> SemanticIndex {
+        let D = CLIPEncoder.dimension
+        let sorted = samples.sorted { $0.0 < $1.0 }
+        var data = Data()
+        data.reserveCapacity(sorted.count * viewCount * D * 2)
+        for (_, vs) in sorted {
+            for v in vs { v.map { Float16($0) }.withUnsafeBufferPointer { data.append(Data(buffer: $0)) } }
+        }
+        return SemanticIndex(clipName: clip.name, duration: clip.duration, times: sorted.map(\.0), yaws: yaws, fov: fov,
+                             dimension: D, vectors: data, timings: timings)
+    }
+
+    /// Writes an index built elsewhere (the analysis's proxy scan) and returns the mapped copy.
+    public static func store(_ index: SemanticIndex, for clip: Clip) -> SemanticIndex {
+        let url = cacheURL(for: clip)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? index.write(to: url)
+        return SemanticIndex.read(url) ?? index
     }
 
     public static var directory: URL {
