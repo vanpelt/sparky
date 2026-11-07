@@ -17,8 +17,11 @@ struct TimelinePane: View {
             VStack(spacing: 4) {
                 FilmstripView(viewer: viewer, item: item, shots: shots)
                     .frame(height: 58)
-                HeadingLane(viewer: viewer, shots: shots, suggestions: suggestions, heat: item?.heat,
-                            analysis: item?.analysis)
+                // While a search matches this clip, the lane shows where the query is instead.
+                let searchHeat = item.flatMap { library.search.match(for: $0) != nil ? library.search.heat[$0.id] : nil }
+                HeadingLane(viewer: viewer, shots: shots, suggestions: suggestions, heat: searchHeat ?? item?.heat,
+                            analysis: item?.analysis,
+                            heatLabel: searchHeat != nil ? "Showing “\(library.search.resultsQuery)”" : nil)
                     .frame(height: 76)
                 MotionRibbon(profile: item?.shakeProfile ?? [], activeShot: viewer.editingShot, duration: viewer.duration)
                     .frame(height: 12)
@@ -173,6 +176,8 @@ struct HeadingLane: View {
     var suggestions: [Suggestion] = []
     var heat: CGImage?
     var analysis: ClipAnalysis?
+    /// Says what the heat is when it isn't interest (a search).
+    var heatLabel: String?
     @State private var hover: CGPoint?
     @State private var mode: DragMode?
     @State private var newRange: ClosedRange<Double>?
@@ -322,6 +327,11 @@ struct HeadingLane: View {
         }
         ctx.draw(Text("Behind").font(.system(size: 9, weight: .medium)).foregroundStyle(.white.opacity(0.3)),
                  at: CGPoint(x: 6, y: h - 2), anchor: .bottomLeading)
+        if let heatLabel {
+            ctx.draw(Text(Image(systemName: "magnifyingglass")).font(.system(size: 8, weight: .semibold))
+                     + Text(" " + heatLabel).font(.system(size: 9, weight: .medium)),
+                     at: CGPoint(x: w - 6, y: 3), anchor: .topTrailing)
+        }
 
         // Shot spans.
         for shot in shots {

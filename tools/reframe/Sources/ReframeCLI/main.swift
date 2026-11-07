@@ -10,6 +10,7 @@ import simd
 //   reframe-cli analyze <file.insv | folder>... [--json] [--no-cache] [--preset blend|people|action|scenery]
 //                       [--heat] [--stills dir [--lut file.cube]]
 //   reframe-cli evaluate <footage folder> [--preset P] [--json]   (scores suggestions against your shots)
+//   reframe-cli models [status|install|remove]
 //   reframe-cli index <file.insv | folder | cloud>... [--no-cache]     (MobileCLIP embeddings, SEMANTIC.md)
 //   reframe-cli search "<query>" <file.insv | folder | cloud>... [--limit N] [--stills dir] [--shots] [--raw]
 //   reframe-cli cloud login|logout|status|list [--raw]|probe <name|mediaId>|fetch <name> [--original]
@@ -303,6 +304,25 @@ case "evaluate":
                          m.rank.map { "now #\($0)" } ?? "no longer suggested", m.aimMean.map { String(format: "re-aimed %.0f° (worst %.0f°)", $0, m.aimWorst ?? 0) } ?? "kept before paths were recorded"))
         }
         for id in c.dismissedStillTop3 { print("  \(c.clip) dismissed \(id) is still in the top 3") }
+    }
+
+case "models":
+    // reframe-cli models [status|install|remove]: the visual search models (SEMANTIC.md).
+    switch args.first ?? "status" {
+    case "install":
+        let start = Date()
+        var last = -1
+        try await SemanticModels.install { p in
+            let pct = Int(p * 100)
+            if pct / 10 != last / 10 { last = pct; print("  \(pct)%") }
+        }
+        print(String(format: "installed in %.1fs", Date().timeIntervalSince(start)))
+    case "remove":
+        try SemanticModels.remove()
+        print("removed")
+    default:
+        print("\(SemanticModels.name): \(SemanticModels.isInstalled ? "installed" : "not installed") in \(CLIPEncoder.modelsDirectory.path)")
+        for f in SemanticModels.files { print("  \(f.path)  \(SemanticModels.needsDownload(f) ? "missing" : "ok")") }
     }
 
 case "index", "search":

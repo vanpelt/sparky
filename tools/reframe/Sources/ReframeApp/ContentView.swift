@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var shotSelection: Set<Shot.ID> = []
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var exportOnly: Set<Shot.ID>?
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
@@ -40,6 +41,23 @@ struct ContentView: View {
                 .inspectorColumnWidth(min: 250, ideal: 280, max: 360)
         }
         .toolbar { toolbar }
+        // One search field for the window: clips by what's in them, shots by name or what they show.
+        .searchable(text: Binding(get: { library.search.text }, set: { library.search.text = $0 }),
+                    placement: .toolbar,
+                    prompt: library.browse == .shots ? "Search shots" : "Search footage")
+        .searchFocused($searchFocused)
+        .onChange(of: library.search.focusRequest) { _, asked in
+            if asked { searchFocused = true; library.search.focusRequest = false }
+        }
+        .onChange(of: library.items.count, initial: true) { _, _ in library.search.itemsChanged() }
+        .onChange(of: library.search.resultsQuery) { _, _ in
+            // A new query: show the open clip's best match (unless you're working on a shot).
+            if viewer.activeShotID == nil { showBestMatch() }
+        }
+        .onChange(of: library.selectedItem?.analysis != nil) { _, _ in
+            if let item = library.selectedItem { library.search.prepareSuggestions(for: item) }
+        }
+        .focusedSceneValue(\.viewer, viewer)
         .navigationTitle(library.browse == .shots ? "Shots" : library.selectedItem.flatMap { $0.clip.captureDate }
             .map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Reframe")
         .navigationSubtitle(library.folder?.lastPathComponent ?? "")
@@ -59,7 +77,10 @@ struct ContentView: View {
         // Keyed on the item, not the selection: a cloud clip's item appears once it's fetched.
         .onChange(of: library.selectedItem?.id, initial: true) { _, _ in
             viewer.library = library
-            viewer.load(library.selectedItem?.clip) { openPendingShot() }
+            viewer.load(library.selectedItem?.clip) {
+                if library.shotToOpen == nil { showBestMatch() }
+                openPendingShot()
+            }
             if let item = library.selectedItem { library.refreshSuggestionThumbnails(for: item) }
         }
         .onAppear { installKeys() }
@@ -127,6 +148,13 @@ struct ContentView: View {
             Button { showInspector.toggle() } label: { Label("Inspector", systemImage: "sidebar.right") }
                 .disabled(library.browse == .shots)
         }
+    }
+
+    /// While searching, opening a clip jumps to where it matches best, looking that way.
+    private func showBestMatch() {
+        guard let item = library.selectedItem, viewer.clip?.url == item.id, viewer.duration > 0 else { return }
+        library.search.prepareSuggestions(for: item)
+        if let hit = library.search.match(for: item)?.hits.first { library.search.show(hit, in: viewer) }
     }
 
     /// Select the shot "Open in Editor" asked for, once its clip is the one in the viewer.
@@ -204,9 +232,19 @@ struct ContentView: View {
     /// REFRAME_SUGGESTION=1 (preview the best suggested shot; =last the latest one; =accept keeps the best),
     /// REFRAME_SELFTEST=1 (keyframe editing, trims and undo; results on stderr),
     /// REFRAME_PRESET=people|action|scenery (this launch only),
-    /// REFRAME_SNAPSHOT=<path.png> (also writes <path>-viewer.png).
+    /// REFRAME_SNAPSHOT=<path.png> (also writes <path>-viewer.png),
+    /// REFRAME_SEARCH=<query> types a search (REFRAME_SEARCH_ON=1 also turns search on).
     private func debugHooks() async {
         let env = ProcessInfo.processInfo.environment
+        if env["REFRAME_SEARCH_ON"] != nil { library.search.isEnabled = true }
+        if let q = env["REFRAME_SEARCH"] {
+            library.search.text = q
+            for _ in 0..<100 where library.search.resultsQuery != q { try? await Task.sleep(for: .milliseconds(100)) }
+            if env["REFRAME_DEBUG"] != nil {
+                let ranked = library.search.ranked(library.items)
+                FileHandle.standardError.write("search hook: \(library.search.indexed.count) indexed, \(ranked.count) match \"\(q)\": \(ranked.prefix(3).map { "\($0.0.clip.name) \($0.1.best)" })\n".data(using: .utf8)!)
+            }
+        }
         if let name = env["REFRAME_SELECT"] {
             for _ in 0..<150 {
                 if let item = library.items.first(where: { $0.clip.name.contains(name) }) {
@@ -453,6 +491,9 @@ struct Sidebar: View {
         @Bindable var library = library
         ScrollViewReader { proxy in
         List(selection: $library.selection) {
+            if library.search.isActive {
+                searchResults
+            } else {
             ForEach(library.days, id: \.day) { day in
                 Section(day.day == Calendar.current.startOfDay(for: .distantPast) ? "Undated"
                         : day.day.formatted(.dateTime.weekday(.wide).month(.wide).day())) {
@@ -470,6 +511,7 @@ struct Sidebar: View {
                     }
                 }
             }
+            }
         }
         .listStyle(.sidebar)
         .onChange(of: library.selection) { _, sel in
@@ -482,6 +524,11 @@ struct Sidebar: View {
         }
         .overlay {
             if library.items.isEmpty && library.loading { ProgressView() }
+            else if library.search.isActive, library.search.isReady, !library.search.busy,
+                    library.search.resultsQuery == library.search.query,
+                    library.search.ranked(library.items).isEmpty {
+                ContentUnavailableView.search(text: library.search.query)
+            }
         }
         .safeAreaInset(edge: .bottom) {
             HStack {
@@ -515,6 +562,40 @@ struct Sidebar: View {
 }
 
 extension Sidebar {
+    /// Clips that match the search, best first; with search off, clips whose file name matches.
+    @ViewBuilder var searchResults: some View {
+        let search = library.search
+        if search.isReady {
+            // Clear matches, then the borderline ones (just over the floor: often a lookalike).
+            let ranked = search.ranked(library.items)
+            let clear = ranked.filter { $0.1.best >= SemanticIndex.clearMatch }
+            let maybe = ranked.filter { $0.1.best < SemanticIndex.clearMatch }
+            ForEach([(clear, "Showing “\(search.resultsQuery)”"), (maybe, clear.isEmpty ? "Might show “\(search.resultsQuery)”" : "Might also show it")],
+                    id: \.1) { group, title in
+                if !group.isEmpty {
+                    Section(title) {
+                        ForEach(group, id: \.0.id) { item, match in
+                            ClipRow(item: item, shotCount: library.shots(for: item.clip).count, match: match)
+                                .tag(item.id)
+                                .id(item.id)
+                        }
+                    }
+                }
+            }
+            SearchStatusRow()
+        } else {
+            Section { SearchOffRow() }
+            let named = library.items.filter { $0.clip.name.localizedCaseInsensitiveContains(search.query) }
+            if !named.isEmpty {
+                Section("File names") {
+                    ForEach(named) { item in
+                        ClipRow(item: item, shotCount: library.shots(for: item.clip).count).tag(item.id).id(item.id)
+                    }
+                }
+            }
+        }
+    }
+
     @ViewBuilder func cloudMenu(_ row: Library.Row) -> some View {
         if let item = row.item {
             if item.originalInCloud, let r = CloudCache.record(for: item.clip.url) {
@@ -663,6 +744,8 @@ func formatBytes(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount
 struct ClipRow: View {
     let item: ClipItem
     let shotCount: Int
+    /// While searching: how this clip matches (its curve replaces the interest sparkline).
+    var match: SemanticMatch? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -687,6 +770,17 @@ struct ClipRow: View {
             .overlay(alignment: .topTrailing) {
                 if item.isCloud { CloudBadge(originalInCloud: item.originalInCloud).padding(5) }
             }
+            .overlay(alignment: .topLeading) {
+                if let hit = match?.hits.first {
+                    Label(formatDuration(hit.time), systemImage: "magnifyingglass")
+                        .font(Theme.numeric(10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+                        .padding(5)
+                        .help("Best match at \(formatDuration(hit.time)), \(directionLabel(hit.yaw))")
+                }
+            }
             .overlay(alignment: .bottomLeading) {
                 if shotCount > 0 {
                     HStack(spacing: 3) {
@@ -700,7 +794,11 @@ struct ClipRow: View {
                     .help("\(shotCount) shot\(shotCount == 1 ? "" : "s") marked")
                 }
             }
-            if !item.interest.isEmpty {
+            if let match {
+                InterestSparkline(values: match.perTime)
+                    .frame(height: 10)
+                    .help(matchHelp(match))
+            } else if !item.interest.isEmpty {
                 InterestSparkline(values: item.interest)
                     .frame(height: 10)
                     .help(sparklineHelp)
@@ -714,6 +812,11 @@ struct ClipRow: View {
             }
         }
         .padding(.vertical, 5)
+    }
+
+    private func matchHelp(_ m: SemanticMatch) -> String {
+        let n = m.hits.count
+        return "Where the search matches over the clip: \(n) moment\(n == 1 ? "" : "s"). Opening it jumps to the best one."
     }
 
     private var sparklineHelp: String {

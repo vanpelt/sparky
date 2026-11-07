@@ -1,3 +1,4 @@
+import Accelerate
 import CoreML
 import CoreVideo
 import Foundation
@@ -22,7 +23,7 @@ public final class CLIPEncoder: @unchecked Sendable {
         case missing(URL)
         public var description: String {
             switch self {
-            case .missing(let u): return "missing \(u.lastPathComponent) in \(u.deletingLastPathComponent().path) (see SEMANTIC.md)"
+            case .missing(let u): return "The search models aren't installed (missing \(u.lastPathComponent)). Download them in Settings › Search."
             }
         }
     }
@@ -37,14 +38,18 @@ public final class CLIPEncoder: @unchecked Sendable {
     private static let sharedLock = NSLock()
 
     /// Loaded once per process (compiling the packages the first time, cached next to them).
-    public static func shared() throws -> CLIPEncoder {
+    /// `reload` drops a loaded encoder first (after the models were reinstalled).
+    public static func shared(reload: Bool = false) throws -> CLIPEncoder {
         try sharedLock.withLock {
-            if let e = sharedEncoder { return e }
+            if !reload, let e = sharedEncoder { return e }
             let e = try CLIPEncoder()
             sharedEncoder = e
             return e
         }
     }
+
+    /// Forget the loaded encoder (its models are about to be deleted).
+    public static func unload() { sharedLock.withLock { sharedEncoder = nil } }
 
     public init(directory: URL = CLIPEncoder.modelsDirectory) throws {
         let config = MLModelConfiguration()
@@ -56,16 +61,21 @@ public final class CLIPEncoder: @unchecked Sendable {
         tokenizer = try CLIPTokenizer(vocab: vocab, merges: merges)
     }
 
-    /// `<name>.mlmodelc` next to `<name>.mlpackage`, compiled on first use (no Xcode needed).
-    private static func compiled(_ name: String, in dir: URL) throws -> URL {
+    /// `compiled/<name>.mlmodelc`, compiled from the downloaded `<name>.mlpackage` on first use
+    /// (no Xcode needed). Only the compiled model is kept: the package would double the space.
+    static func compiled(_ name: String, in dir: URL) throws -> URL {
         let out = dir.appendingPathComponent("compiled/\(name).mlmodelc")
-        if FileManager.default.fileExists(atPath: out.path) { return out }
         let pkg = dir.appendingPathComponent("\(name).mlpackage")
+        if FileManager.default.fileExists(atPath: out.path) {
+            try? FileManager.default.removeItem(at: pkg)
+            return out
+        }
         guard FileManager.default.fileExists(atPath: pkg.path) else { throw Failure.missing(pkg) }
         let tmp = try MLModel.compileModel(at: pkg)
         try FileManager.default.createDirectory(at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: out)
         try FileManager.default.moveItem(at: tmp, to: out)
+        try? FileManager.default.removeItem(at: pkg)
         return out
     }
 
@@ -144,8 +154,13 @@ public final class CLIPEncoder: @unchecked Sendable {
 
 /// Image embeddings of one clip: `views` world-locked horizon views (heading-grid frame, the
 /// same Lock-at-clip-start frame as the interest map) every 1/rate seconds.
+///
+/// On disk it's one memory-mapped file per clip: "RFS1", a little-endian UInt32 header length,
+/// the JSON header (everything but the vectors), zero padding to 16 bytes, then the Float16
+/// vectors. Derived, write-once, read-in-bulk data like this doesn't need a database: mapping it
+/// lets the OS page it in and out, and scoring is one matrix-vector product (Accelerate).
 public struct SemanticIndex: Codable, Sendable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public var version = SemanticIndex.currentVersion
     public var model = CLIPEncoder.modelName
@@ -156,23 +171,69 @@ public struct SemanticIndex: Codable, Sendable {
     public var yaws: [Double]
     public var fov: Double
     public var dimension: Int
-    /// Float16, unit length, [time][view][dimension].
-    public var vectors: Data
+    /// Float16, unit length, [time][view][dimension]. Not in the JSON header.
+    public var vectors = Data()
     public var timings: [String: Double] = [:]
+
+    enum CodingKeys: String, CodingKey { case version, model, clipName, duration, times, yaws, fov, dimension, timings }
+
+    public init(clipName: String, duration: Double, times: [Double], yaws: [Double], fov: Double, dimension: Int,
+                vectors: Data, timings: [String: Double] = [:]) {
+        self.clipName = clipName; self.duration = duration; self.times = times; self.yaws = yaws
+        self.fov = fov; self.dimension = dimension; self.vectors = vectors; self.timings = timings
+    }
 
     public var viewCount: Int { yaws.count }
 
-    /// Cosine similarity of every (time, view) to a unit query vector, [time][view].
+    static let magic = Data("RFS1".utf8)
+
+    func write(to url: URL) throws {
+        var header = try JSONEncoder().encode(self)
+        var out = SemanticIndex.magic
+        withUnsafeBytes(of: UInt32(header.count).littleEndian) { out.append(contentsOf: $0) }
+        out.append(header)
+        while out.count % 16 != 0 { out.append(0) }
+        out.append(vectors)
+        header.removeAll()
+        try out.write(to: url, options: .atomic)
+    }
+
+    static func read(_ url: URL) -> SemanticIndex? {
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped), data.count > 8,
+              data.prefix(4) == magic else { return nil }
+        let n = Int(data.subdata(in: 4..<8).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian)
+        guard data.count >= 8 + n, var s = try? JSONDecoder().decode(SemanticIndex.self, from: data.subdata(in: 8..<(8 + n)))
+        else { return nil }
+        let start = (8 + n + 15) / 16 * 16
+        let bytes = s.times.count * s.yaws.count * s.dimension * 2
+        guard data.count >= start + bytes else { return nil }
+        s.vectors = data[start..<(start + bytes)]  // a slice: stays mapped, no copy
+        return s
+    }
+
+    /// Cosine similarity of every (time, view) to a unit query vector, [time][view]: Float16 rows
+    /// converted in blocks and multiplied with vDSP (a few ms per hour of footage).
     public func similarities(_ q: [Float]) -> [Float] {
-        let n = times.count * yaws.count, D = dimension
-        var out = [Float](repeating: 0, count: n)
+        let rows = times.count * yaws.count, D = dimension
+        guard rows > 0, q.count == D else { return [] }
+        var out = [Float](repeating: 0, count: rows)
+        let block = 1024
+        var scratch = [Float](repeating: 0, count: block * D)
         vectors.withUnsafeBytes { raw in
-            let h = raw.bindMemory(to: Float16.self)
-            for i in 0..<n {
-                var s: Float = 0
-                let o = i * D
-                for k in 0..<D { s += Float(h[o + k]) * q[k] }
-                out[i] = s
+            guard let base = raw.baseAddress else { return }
+            var r0 = 0
+            while r0 < rows {
+                let n = min(block, rows - r0)
+                var src = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: base + r0 * D * 2), height: 1,
+                                        width: vImagePixelCount(n * D), rowBytes: n * D * 2)
+                scratch.withUnsafeMutableBytes { dst in
+                    var d = vImage_Buffer(data: dst.baseAddress, height: 1, width: vImagePixelCount(n * D), rowBytes: n * D * 4)
+                    vImageConvert_Planar16FtoPlanarF(&src, &d, 0)
+                }
+                out.withUnsafeMutableBufferPointer { o in
+                    vDSP_mmul(scratch, 1, q, 1, o.baseAddress! + r0, 1, vDSP_Length(n), 1, vDSP_Length(D))
+                }
+                r0 += n
             }
         }
         return out
@@ -227,11 +288,13 @@ public enum SemanticIndexer {
     public static var fov = 90.0
 
     public static func cached(_ clip: Clip) -> SemanticIndex? {
-        guard let d = try? Data(contentsOf: cacheURL(for: clip)),
-              let s = try? PropertyListDecoder().decode(SemanticIndex.self, from: d),
+        guard let s = SemanticIndex.read(cacheURL(for: clip)),
               s.version == SemanticIndex.currentVersion, s.model == CLIPEncoder.modelName else { return nil }
         return s
     }
+
+    /// Whether a current index exists, without reading it.
+    public static func isIndexed(_ clip: Clip) -> Bool { FileManager.default.fileExists(atPath: cacheURL(for: clip).path) }
 
     public static func index(_ clip: Clip, useCache: Bool = true) async throws -> SemanticIndex? {
         if useCache, let s = cached(clip) { return s }
@@ -247,10 +310,8 @@ public enum SemanticIndexer {
         }
         let url = cacheURL(for: clip)
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let enc = PropertyListEncoder()
-        enc.outputFormat = .binary
-        try? enc.encode(index).write(to: url, options: .atomic)
-        return index
+        try? index.write(to: url)
+        return SemanticIndex.read(url) ?? index
     }
 
     private static func build(clip: Clip, motion: Motion, reader: FrameReader, renderer: ReframeRenderer,
@@ -295,13 +356,24 @@ public enum SemanticIndexer {
                              timings: ["decode": tDecode, "render": tRender, "embed": tEmbed])
     }
 
-    /// `~/Library/Application Support/Reframe/semantic/<name>-<size>-<mtime>.plist`, keyed like
-    /// the analysis cache so a replaced file (stub → original) re-indexes.
+    public static var directory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Reframe/semantic", isDirectory: true)
+    }
+
+    /// `~/Library/Application Support/Reframe/semantic/<name>-<size>-<mtime>.rfsi`, keyed like
+    /// the analysis cache so a replaced file (stub → original) re-indexes. Keyed by the proxy's
+    /// identity would survive that, but the original's trailer is what we have for every clip.
     public static func cacheURL(for clip: Clip) -> URL {
         let name = Analyzer.cacheURL(for: clip).deletingPathExtension().lastPathComponent
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Reframe/semantic", isDirectory: true)
-            .appendingPathComponent("\(name).plist")
+        return directory.appendingPathComponent("\(name).rfsi")
+    }
+
+    /// Deletes every index (and the prototype's .plist ones). Returns how many files went.
+    @discardableResult
+    public static func clear() -> Int {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { ["rfsi", "plist"].contains($0.pathExtension) && (try? FileManager.default.removeItem(at: $0)) != nil }.count
     }
 }
 
@@ -338,7 +410,8 @@ extension ClipAnalysis {
     /// Suggestions for a text query: the query's heading channel added to the interest map and
     /// weighted to dominate, so shots start where it matches and the camera path aims at it.
     /// Other signals still shape the cut points and break ties.
-    public func searched(_ channel: [Float], weight: Double = 2.5, others: Double = 0.25,
+    /// `id` keys the suggestions (dismissals are remembered by it), so pass one per query.
+    public func searched(_ channel: [Float], id: String? = nil, weight: Double = 2.5, others: Double = 0.25,
                          suggester: ShotSuggester = ShotSuggester()) -> ClipAnalysis {
         var a = self
         var w = weights
@@ -348,9 +421,75 @@ extension ClipAnalysis {
         var grid = heading ?? HeadingGrid(rate: signals.rate, count: signals.count)
         grid[.query] = channel
         a.heading = grid
-        a.suggestions = suggester.suggest(a.inputs, weights: w, clipID: clipName, duration: duration)
+        a.suggestions = suggester.suggest(a.inputs, weights: w, clipID: id ?? clipName, duration: duration)
             .filter { $0.reasons.contains(.query) }
         (a.score, a.bestMoment) = ClipAnalysis.rank(a.suggestions, fused: a.fused(), rate: signals.rate)
         return a
+    }
+}
+
+/// One query against one clip's index.
+public struct SemanticMatch: Sendable {
+    /// Cosine similarity per (sample, view), [time][view].
+    public var similarity: [Float]
+    /// 0…1 per (sample, view): `SemanticIndex.relevance`.
+    public var relevance: [Float]
+    /// Best relevance over views per sample (the clip's match curve).
+    public var perTime: [Float]
+    /// The best similarity anywhere in the clip (ranks clips).
+    public var best: Float
+    /// Peaks, best first.
+    public var hits: [SemanticHit]
+    public var isMatch: Bool { !hits.isEmpty }
+}
+
+extension SemanticIndex {
+    /// Cosines at or below this aren't matches (MobileCLIP-S2; SEMANTIC.md).
+    public static let matchFloor: Float = 0.17
+    public static let matchSpread: Float = 0.08
+    /// At or above this, it's clearly there; between the floor and this, a lookalike is as likely.
+    public static let clearMatch: Float = 0.21
+
+    public func match(_ q: [Float], limit: Int = 8, gap: Double = 6) -> SemanticMatch {
+        let sims = similarities(q)
+        let rel = sims.map { clamp01(($0 - SemanticIndex.matchFloor) / SemanticIndex.matchSpread) }
+        let V = viewCount
+        let perTime = (0..<times.count).map { t in rel[(t * V)..<((t + 1) * V)].max() ?? 0 }
+        return SemanticMatch(similarity: sims, relevance: rel, perTime: perTime, best: sims.max() ?? -1,
+                             hits: hits(similarity: sims, floor: SemanticIndex.matchFloor, limit: limit, gap: gap))
+    }
+
+    /// `values` ([time][view]) at a heading-grid yaw and time, interpolated between neighbouring
+    /// views and samples.
+    public func value(_ values: [Float], time t: Double, yaw: Double) -> Float {
+        let V = viewCount, T = times.count
+        guard V > 0, T > 0, values.count == V * T else { return 0 }
+        var j = 0
+        while j < T - 2, times[j + 1] < t { j += 1 }
+        let (t0, t1) = (times[j], times[min(j + 1, T - 1)])
+        let a = Float(t1 > t0 ? min(max((t - t0) / (t1 - t0), 0), 1) : 0)
+        let spacing = 360 / Double(V)
+        var off = (yaw - yaws[0]).truncatingRemainder(dividingBy: 360)
+        if off < 0 { off += 360 }
+        let v0 = Int(off / spacing) % V, v1 = (v0 + 1) % V
+        let w = Float((off - Double(v0) * spacing) / spacing)
+        func at(_ r: Int) -> Float { values[r * V + v0] * (1 - w) + values[r * V + v1] * w }
+        return at(j) * (1 - a) + at(min(j + 1, T - 1)) * a
+    }
+
+    /// How well a shot matches: the best `values` along its line of sight (its keyframed aim, in
+    /// its stabilization), sampled twice a second, and when that was.
+    public func along(_ shot: Shot, motion: Motion, values: [Float]) -> (value: Float, time: Double) {
+        let origin = motion.baseHeading(at: 0, mode: .lock, smoothing: 0, lockTime: 0)
+        var best: (Float, Double) = (-1, shot.inTime)
+        var t = shot.inTime
+        while t <= shot.outTime {
+            let heading = motion.baseHeading(at: t, mode: shot.stabilization, smoothing: shot.smoothing,
+                                             lockTime: shot.lockTime) + shot.framing(at: t).yaw - origin
+            let v = value(values, time: t, yaw: heading)
+            if v > best.0 { best = (v, t) }
+            t += 0.5
+        }
+        return best
     }
 }

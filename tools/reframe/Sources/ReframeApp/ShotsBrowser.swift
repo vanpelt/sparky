@@ -8,7 +8,6 @@ struct ShotsBrowser: View {
     @Environment(Library.self) private var library
     @Binding var selection: Set<Shot.ID>
     @AppStorage("shots.sort") private var sort: Sort = .recorded
-    @State private var query = ""
     /// Anchor for shift-click ranges.
     @State private var anchor: Shot.ID?
     /// The shot whose name is being edited in place.
@@ -34,10 +33,13 @@ struct ShotsBrowser: View {
 
     /// The shots in view, filtered and grouped (by recording day, or one group when sorted otherwise).
     var groups: [Group] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        // The window's search field: a shot's name or clip, or (with search on) what it looks at.
+        let q = library.search.query.lowercased()
+        let scores = library.search.shotScores
         let shots = library.shots.filter { s in
             q.isEmpty || s.name.lowercased().contains(q)
                 || URL(fileURLWithPath: s.clipPath).lastPathComponent.lowercased().contains(q)
+                || (scores[s.id] ?? -1) > SemanticIndex.matchFloor
         }
         switch sort {
         case .recorded:
@@ -75,7 +77,7 @@ struct ShotsBrowser: View {
                     Button("Browse Clips") { library.browse = .clips }.buttonStyle(.borderedProminent)
                 }
             } else if groups.allSatisfy({ $0.shots.isEmpty }) {
-                ContentUnavailableView.search(text: query)
+                ContentUnavailableView.search(text: library.search.query)
             } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 250, maximum: 360), spacing: 18, alignment: .top)],
@@ -124,9 +126,6 @@ struct ShotsBrowser: View {
                     .caption()
             }
             Spacer()
-            TextField("Filter", text: $query, prompt: Text("Filter by name or clip"))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
             Picker("Sort", selection: $sort) {
                 ForEach(Sort.allCases) { Text($0.label).tag($0) }
             }

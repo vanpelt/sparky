@@ -12,7 +12,7 @@ struct StorageSettings: View {
     @State private var confirm: Action?
 
     enum Action: Identifiable {
-        case analysis, originals, clips
+        case analysis, searchIndex, models, originals, clips
         var id: Int { hashValue }
     }
 
@@ -86,6 +86,12 @@ struct StorageSettings: View {
         return VStack(alignment: .leading, spacing: 10) {
             row("Analysis cache", "Recomputed when a clip is next opened, a few seconds each.",
                 button: "Clear…", disabled: r.bytes(.analysis) == 0) { confirm = .analysis }
+            row("Search index", r.bytes(.searchIndex) == 0 ? "Nothing indexed."
+                : "Rebuilt in the background while search is on, about 2 seconds per minute of footage.",
+                button: "Clear…", disabled: r.bytes(.searchIndex) == 0) { confirm = .searchIndex }
+            row("Search models", r.bytes(.models) == 0 ? "Not downloaded. Turn on search in the Search tab to get them."
+                : "\(SemanticModels.name). Search needs them; downloading again takes a minute or two.",
+                button: "Remove…", disabled: r.bytes(.models) == 0) { confirm = .models }
             row("Downloaded originals", originals == 0 ? "None downloaded."
                 : "\(originals) original\(originals == 1 ? "" : "s"). Export downloads or clones them again when needed.",
                 button: "Remove…", disabled: originals == 0) { confirm = .originals }
@@ -110,6 +116,8 @@ struct StorageSettings: View {
     private var title: String {
         switch confirm {
         case .analysis: return "Clear the analysis cache?"
+        case .searchIndex: return "Clear the search index?"
+        case .models: return "Remove the search models?"
         case .originals: return "Remove downloaded originals?"
         case .clips: return "Remove cached cloud clips?"
         case nil: return ""
@@ -121,6 +129,10 @@ struct StorageSettings: View {
         switch a {
         case .analysis:
             return "Frees \(formatBytes(r.bytes(.analysis))). Each clip is analyzed again the next time Reframe opens it."
+        case .searchIndex:
+            return "Frees \(formatBytes(r.bytes(.searchIndex))). While search is on, clips are indexed again in the background; until then they don't show up in search results."
+        case .models:
+            return "Frees \(formatBytes(r.bytes(.models))) and turns search off. The search index is kept, so turning search back on (and downloading the models again) brings results back right away."
         case .originals:
             return "Frees up to \(formatBytes(r.bytes(.originals))). The clips keep their proxies and shots; exporting them downloads (or clones from Insta360 Studio) the originals again."
         case .clips:
@@ -132,6 +144,10 @@ struct StorageSettings: View {
         switch a {
         case .analysis:
             Button("Clear Analysis Cache", role: .destructive) { library.clearAnalysisCache(); Task { await rescan() } }
+        case .searchIndex:
+            Button("Clear Search Index", role: .destructive) { library.search.clearIndex(); Task { await rescan() } }
+        case .models:
+            Button("Remove Models", role: .destructive) { library.search.removeModels(); Task { await rescan() } }
         case .originals:
             Button("Remove Originals", role: .destructive) { library.removeDownloadedOriginals(); Task { await rescan() } }
         case .clips:
@@ -172,7 +188,7 @@ struct StorageRing: View {
     let report: StorageReport
     @Binding var hovered: String?
 
-    /// Categorical slots 1–4 of the dark data-viz palette (validated on a dark surface, wrap-around
+    /// Categorical slots 1–5 and 7 of the dark data-viz palette (validated on a dark surface, wrap-around
     /// pair included), in fixed order; "other" is neutral gray, not a hue.
     static func color(_ kind: StorageReport.Kind) -> Color {
         switch kind {
@@ -180,6 +196,8 @@ struct StorageRing: View {
         case .originals: return Color(red: 0xd9 / 255, green: 0x59 / 255, blue: 0x26 / 255)
         case .gyro: return Color(red: 0x19 / 255, green: 0x9e / 255, blue: 0x70 / 255)
         case .analysis: return Color(red: 0xc9 / 255, green: 0x85 / 255, blue: 0x00 / 255)
+        case .searchIndex: return Color(red: 0xd5 / 255, green: 0x51 / 255, blue: 0x81 / 255)  // slot 5, magenta
+        case .models: return Color(red: 0x90 / 255, green: 0x85 / 255, blue: 0xe9 / 255)       // slot 7, violet
         case .other: return Color(white: 0.45)
         }
     }
@@ -204,7 +222,7 @@ struct StorageRing: View {
             let span = Double(bytes) / total
             out.append(Segment(id: kind.rawValue, ring: 0, start: a, end: a + span, kind: kind, label: kind.label, bytes: bytes))
             // Outer ring: this kind's clips, biggest first; slivers under ~2° merge into one.
-            if kind != .analysis && kind != .other {
+            if ![.analysis, .searchIndex, .models, .other].contains(kind) {
                 var b = a, small: Int64 = 0, smallCount = 0
                 for e in report.entries(kind).sorted(by: { $0.bytes > $1.bytes }) {
                     let s = Double(e.bytes) / total

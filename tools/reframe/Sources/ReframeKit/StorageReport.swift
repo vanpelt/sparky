@@ -7,7 +7,7 @@ import Foundation
 /// them frees less than their size; `shared` counts those.
 public struct StorageReport: Sendable {
     public enum Kind: String, CaseIterable, Sendable, Identifiable {
-        case proxies, originals, gyro, analysis, other
+        case proxies, originals, gyro, analysis, searchIndex, models, other
         public var id: String { rawValue }
         public var label: String {
             switch self {
@@ -15,6 +15,8 @@ public struct StorageReport: Sendable {
             case .originals: return "Originals"
             case .gyro: return "Gyro & metadata"
             case .analysis: return "Analysis"
+            case .searchIndex: return "Search index"
+            case .models: return "Search models"
             case .other: return "Shots & settings"
             }
         }
@@ -24,6 +26,8 @@ public struct StorageReport: Sendable {
             case .originals: return "Full originals downloaded for export"
             case .gyro: return "Each cloud clip's trailer: gyro, calibration, metadata"
             case .analysis: return "Interest analysis results, reused until a clip's file changes"
+            case .searchIndex: return "What's in view each second, for searching your footage by description"
+            case .models: return "\(SemanticModels.name), the on-device model that understands what's in view"
             case .other: return "Your shots, sign-in, preferences and file aliases"
             }
         }
@@ -95,6 +99,14 @@ public struct StorageReport: Sendable {
         let analysis = size(support.appendingPathComponent("analysis"))
         if analysis.0 > 0 {
             r.entries.append(Entry(id: "analysis", kind: .analysis, name: "Analysis cache", bytes: analysis.0, shared: analysis.1))
+        }
+        let search = size(SemanticIndexer.directory)
+        if search.0 > 0 {
+            r.entries.append(Entry(id: "searchIndex", kind: .searchIndex, name: "Search index", bytes: search.0, shared: search.1))
+        }
+        let models = size(CLIPEncoder.modelsDirectory)
+        if models.0 > 0 {
+            r.entries.append(Entry(id: "models", kind: .models, name: SemanticModels.name, bytes: models.0, shared: models.1))
         }
         var other = size(support.appendingPathComponent("projects"))
         let session = size(CloudSession.fileURL)

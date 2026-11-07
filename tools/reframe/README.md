@@ -50,11 +50,18 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   the current view as a keyframe. Between keyframes the camera eases along a smooth path. ⌘Z / ⇧⌘Z
   undo and redo shot edits. Shots are saved per footage folder in
   `~/Library/Application Support/Reframe/projects/` (the footage folder is never written).
+- **Search (⌘F; SEMANTIC.md):** describe a moment ("a waterfall", "riding bikes") in the toolbar
+  field. Clips become the matching clips, best first; opening one jumps to its best match and looks
+  that way; the heading lane shows where the query is, suggested shots aim at it, the inspector
+  lists the matches (⌘G / ⇧⌘G step through them), and Shots matches what each shot looks at. Turn
+  it on in **Settings › Search**, which downloads Apple's MobileCLIP-S2 (~200 MB, on-device) and
+  indexes clips in the background (about 2 s per minute of footage).
 - **Settings › Storage (⌘,; also Manage Storage… in the cloud menu):** what Reframe keeps on disk
-  as a two-ring chart (inner: proxies, originals, gyro and metadata, analysis, shots and settings;
+  as a two-ring chart (inner: proxies, originals, gyro and metadata, analysis, search index and
+  models, shots and settings;
   outer: the clips in each; hover to read a segment) with sizes, how much is cloned from Insta360
   Studio's or your own copies (removing that frees less), and confirmed ways to clear the
-  analysis cache, turn downloaded originals back into trailer stubs, or remove cached cloud clips
+  analysis cache or search index, remove the search models, turn downloaded originals back into trailer stubs, or remove cached cloud clips
   (only those without shots, or all; shots are always kept). `reframe-cli storage
   [--remove-originals]` prints the same report.
 - **Shots view (⌘2; ⌘1 back to clips):** every shot you've made, local and cloud, as a contact
@@ -128,8 +135,9 @@ binary inside the bundle directly can leave the app without a window.
 `REFRAME_SHOTS_SELECT=<n>` to select the first n), `REFRAME_OPEN_SHOT=<i>` (Open in Editor on the
 i-th shot, reports where the viewer lands), `REFRAME_RENAME_TEST=1` (renames the first shot and
 back), `REFRAME_FOCUS_TEST=1` (a click on the viewer and Return must take focus off the inspector's
-Name field), `REFRAME_SETTINGS=1` (opens Settings; the snapshot then captures it, `REFRAME_STORAGE_HOVER=<kind>`
-highlights a segment), `REFRAME_GESTURE_TEST=x,y;x,y` (with `REFRAME_BROWSE=shots`: double-clicks the first
+Name field), `REFRAME_SETTINGS=1` (opens Settings; the snapshot then captures it, `REFRAME_SETTINGS_TAB=search|storage`
+picks the tab, `REFRAME_STORAGE_HOVER=<kind>` highlights a segment), `REFRAME_SEARCH=<query>` (types a
+search; `REFRAME_SEARCH_ON=1` also turns search on), `REFRAME_GESTURE_TEST=x,y;x,y` (with `REFRAME_BROWSE=shots`: double-clicks the first
 card's name and picture at those points), `REFRAME_DEBUG=1` (playback fps and window
 state to stderr), `REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal
 view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.

@@ -13,7 +13,9 @@ aim the camera, and hand off clean log selects.
 2. **Footage stays honest.** Log is the truth. A LUT is a "Look" you hold up to preview, and it
    never leaks into exports unless you explicitly bake it.
 3. **One bright line.** Color is reserved for the sightline: the look path, playhead, keyframes
-   and the primary action. Clip metadata is set in plain ink.
+   and the primary action. Clip metadata is set in plain ink. Search results follow suit: while
+   a search is showing, the horizon scan's white heat is the query's instead of interest (and says
+   so), rather than adding a second hue.
 
 ## Tokens
 

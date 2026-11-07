@@ -11,6 +11,7 @@ struct Inspector: View {
             Form {
                 if let shot = viewer.activeShot { ShotSection(shot: shot, viewer: viewer) }
                 if let s = viewer.selectedSuggestion { SuggestionSection(suggestion: s, viewer: viewer) }
+                if library.search.isActive, library.search.isReady { MatchesSection(item: item, viewer: viewer) }
                 FramingSection(viewer: viewer)
                 Section("Stabilization") {
                     Picker("Mode", selection: $viewer.stabilization) {
@@ -197,6 +198,60 @@ private struct FramingSection: View {
 }
 
 /// What suggestions favour, for every clip. Re-ranks instantly from cached analysis.
+/// While searching: where the query shows up in this clip. Click one to jump there and look at it.
+private struct MatchesSection: View {
+    @Environment(Library.self) private var library
+    let item: ClipItem
+    @Bindable var viewer: ViewerModel
+
+    var body: some View {
+        let search = library.search
+        Section {
+            if let m = search.match(for: item) {
+                ForEach(m.hits.sorted { $0.time < $1.time }, id: \.time) { hit in
+                    Button { search.show(hit, in: viewer) } label: {
+                        HStack(spacing: 10) {
+                            Text(formatDuration(hit.time)).font(Theme.numeric(12)).frame(width: 40, alignment: .leading)
+                            Text(directionLabel(hit.yaw).capitalizedFirst).font(.system(size: 12))
+                            Spacer()
+                            StrengthBars(value: Double((hit.score - SemanticIndex.matchFloor) / SemanticIndex.matchSpread))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Jump to \(formatDuration(hit.time)) and look \(directionLabel(hit.yaw))")
+                }
+                Text("⌘G and ⇧⌘G step through them. Suggested shots below are aimed at the search.").caption()
+            } else {
+                Text(search.indexed.contains(item.id) ? "Nothing in this clip looks like “\(search.resultsQuery)”."
+                     : "This clip isn't indexed yet.").caption()
+            }
+        } header: {
+            Text("Matches for “\(search.resultsQuery.isEmpty ? search.query : search.resultsQuery)”")
+        }
+    }
+}
+
+/// Three bars for how clearly something matches (a value, not decoration).
+private struct StrengthBars: View {
+    let value: Double
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<3) { i in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(.primary.opacity(value > Double(i) / 3 ? 0.75 : 0.18))
+                    .frame(width: 3, height: 5 + CGFloat(i) * 3)
+            }
+        }
+        .accessibilityLabel(value > 0.66 ? "Strong match" : value > 0.33 ? "Good match" : "Weak match")
+    }
+}
+
+extension String {
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
+}
+
 private struct SuggestionsSection: View {
     @Environment(Library.self) private var library
 

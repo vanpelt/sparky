@@ -29,24 +29,54 @@ Speed (M-series, release build): indexing runs at **0.03× real time** (29 min o
 27 s; decode 20%, render 20%, embed 60%). Searching an indexed clip takes ~0.3 s, model load
 included.
 
+## In the app
+
+- **Settings › Search** turns it on. Turning it on downloads the model (with progress, resumable
+  by turning it on again) and starts indexing in the background, the clip you're looking at
+  first, then newest first. Settings › Storage lists the index and the models with their own
+  Clear/Remove actions.
+- **One search field** (the window toolbar's, ⌘F) serves every view:
+  - *Clips*: the sidebar becomes the matching clips, best first, split into clear matches
+    (cosine ≥ 0.21) and possible ones (0.17–0.21, often lookalikes). Each row's sparkline becomes
+    the match over time, with a badge at the best moment. Opening one jumps there and looks that way.
+  - *Editor*: the heading lane shows the query's heat instead of interest (labelled, still white:
+    color stays reserved for the sightline), suggested shots become shots aimed at the query, and the
+    inspector lists the matches; ⌘G / ⇧⌘G step through them.
+  - *Shots*: a shot matches by name, by clip, or by what it looks at (similarity along its
+    keyframed line of sight).
+- Search off, the field still filters clips by file name and shots by name, with a prompt to turn it on.
+
+## Storage, and why not a database
+
+The index is derived, write-once, read-in-bulk data, so it's one memory-mapped file per clip
+(`semantic/<name>-<size>-<mtime>.rfsi`: magic, JSON header, Float16 vectors), keyed like the
+analysis cache. Scoring is a matrix-vector product with Accelerate (vImage Float16→Float, vDSP),
+a few milliseconds per hour of footage, so there's nothing for an ANN index or SQLite (with a vector
+extension) to speed up at this scale, and SwiftData/Core Data would add a schema and migrations for
+data we can always regenerate. Settings are UserDefaults. If clips or shots should ever be findable
+from Spotlight, Core Spotlight (`CSSearchableIndex`) is the Apple-native next step, fed with text
+we derive (shot names, captions), not these vectors.
+
 ## Models
 
-They are not in git (197 MB). Put them in `~/Library/Application Support/Reframe/models/`:
+Downloaded by the app (Settings › Search) or `reframe-cli models install` into
+`~/Library/Application Support/Reframe/models/` (excluded from Time Machine), from URLs pinned to
+Hugging Face commits and checked by SHA-256 (`SemanticModels.swift`):
 
 ```
 mobileclip_s2_image.mlpackage   huggingface.co/apple/coreml-mobileclip (71 MB)
-mobileclip_s2_text.mlpackage    huggingface.co/apple/coreml-mobileclip (126 MB)
-clip-vocab.json                 huggingface.co/openai/clip-vit-base-patch32 vocab.json
-clip-merges.txt                 huggingface.co/openai/clip-vit-base-patch32 merges.txt
+mobileclip_s2_text.mlpackage    huggingface.co/apple/coreml-mobileclip (127 MB)
+clip-vocab.json, clip-merges.txt  huggingface.co/openai/clip-vit-base-patch32 (1.4 MB)
 ```
 
-They are compiled to `models/compiled/*.mlmodelc` on first use (no Xcode needed). The weights
-are under Apple's ASCL license.
+Each package is compiled for this Mac (`compiled/*.mlmodelc`) and then deleted, so ~190 MB stays
+on disk. The weights are under Apple's ASCL license.
 
 ## CLI
 
 ```bash
 swift build -c release --product reframe-cli
+.build/release/reframe-cli models install                    # or status / remove
 .build/release/reframe-cli index cloud                       # or a folder / .insv files
 .build/release/reframe-cli search "a waterfall" cloud --limit 8 --stills /tmp/hits
 .build/release/reframe-cli search "a person riding a mountain bike" clip.insv --shots
@@ -57,8 +87,6 @@ swift build -c release --product reframe-cli
 
 - Fold indexing into `ProxyScan` (it already renders world-locked views for the face detector)
   so analysis decodes the proxy once.
-- App UI: a library search field (rank clips by best hit) and a query box that drops the `query`
-  heat into the heading lane and shows the searched suggestions as ghost shots.
 - Calibrate the floor on more footage (it's from ~20 queries over 17 clips), and try
   MobileCLIP2 (better retrieval; would need a Core ML conversion).
 - Use the same vectors for library-wide de-duplication and "more like this shot".

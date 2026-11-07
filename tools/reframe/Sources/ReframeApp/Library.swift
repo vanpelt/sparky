@@ -50,6 +50,8 @@ final class Library {
     @ObservationIgnored private var shotFrameTasks: Set<Shot.ID> = []
     /// Insta360 Cloud: its recordings join the library once fetched (trailer + LRV).
     let cloud: CloudLibrary = MainActor.assumeIsolated { CloudLibrary() }
+    /// Searching footage by what's in view (Search.swift).
+    let search: FootageSearch = MainActor.assumeIsolated { FootageSearch() }
     var loading = false
     var lutFolder: URL?
     var lutURLs: [URL] = []
@@ -106,7 +108,11 @@ final class Library {
             loadShots()
         }
         loadCloudClips()
-        MainActor.assumeIsolated { cloud.start() }
+        MainActor.assumeIsolated {
+            cloud.start()
+            search.library = self
+            search.start()
+        }
     }
 
     var selectedItem: ClipItem? { items.first { $0.id == selection } }
@@ -563,10 +569,12 @@ final class Library {
     }
 
     /// Suggested shots still on offer: not dismissed and not already covered by a shot.
+    /// While a search matches the clip, the shots on offer are the ones aimed at the query.
     func suggestions(for clip: Clip?) -> [Suggestion] {
-        guard let clip, let a = item(for: clip.url.path)?.analysis else { return [] }
+        guard let clip, let item = item(for: clip.url.path), let a = item.analysis else { return [] }
         let taken = shots(for: clip)
-        return a.suggestions.filter { s in
+        let offered = MainActor.assumeIsolated { search.match(for: item) != nil ? search.suggestions[item.id] : nil }
+        return (offered ?? a.suggestions).filter { s in
             !dismissed.contains(s.id) && !taken.contains { shot in
                 min(shot.outTime, s.outTime) - max(shot.inTime, s.inTime) > 0.5 * s.duration
             }

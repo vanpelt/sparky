@@ -31,6 +31,7 @@ struct ReframeApp: App {
                 }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             }
+            SearchCommands(library: library)
             CommandGroup(before: .sidebar) {
                 Button("Clips") { library.browse = .clips }.keyboardShortcut("1")
                 Button("Shots") { library.browse = .shots }.keyboardShortcut("2")
@@ -45,9 +46,9 @@ struct ReframeApp: App {
             }
         }
 
-        // Reframe › Settings… (⌘,): storage.
+        // Reframe › Settings… (⌘,): storage, and search (its models and index).
         Settings {
-            StorageSettings()
+            SettingsView()
                 .environment(library)
                 .preferredColorScheme(.dark)
         }
