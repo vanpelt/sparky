@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var showInspector = true
     @State private var showExport = false
     @State private var keyMonitor: Any?
+    @State private var clickMonitor: Any?
     @State private var shotSelection: Set<Shot.ID> = []
     @State private var columns: NavigationSplitViewVisibility = .all
     @State private var exportOnly: Set<Shot.ID>?
@@ -61,7 +62,10 @@ struct ContentView: View {
             if let item = library.selectedItem { library.refreshSuggestionThumbnails(for: item) }
         }
         .onAppear { installKeys() }
-        .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
+        .onDisappear {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        }
         .task { await debugHooks() }
     }
 
@@ -153,6 +157,17 @@ struct ContentView: View {
     /// Single-key shortcuts, ignored while typing in a text field.
     private func installKeys() {
         guard keyMonitor == nil else { return }
+        // Clicking anywhere outside the text field being edited (the viewer, the lanes, a card)
+        // ends the edit: those views don't take keyboard focus themselves, so without this the
+        // field keeps it and space types into the name instead of playing.
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+            if let window = event.window, let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+               let field = editor.delegate as? NSView {
+                let p = field.convert(event.locationInWindow, from: nil)
+                if !field.bounds.contains(p) { window.makeFirstResponder(nil) }
+            }
+            return event
+        }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if NSApp.keyWindow?.firstResponder is NSText || showExport { return event }
             if library.browse == .shots { return shotsKey(event) ? nil : event }
@@ -252,6 +267,40 @@ struct ContentView: View {
                 for _ in 0..<100 where library.shotFrames[shot.id] == nil { try? await Task.sleep(for: .milliseconds(100)) }
                 FileHandle.standardError.write("shots hook: \(library.shots.count) shots, hover frames for \(shot.name) of \(URL(fileURLWithPath: shot.clipPath).lastPathComponent): \(library.shotFrames[shot.id]?.count ?? 0)\n".data(using: .utf8)!)
             }
+        }
+        // REFRAME_FOCUS_TEST=1: open the first shot, focus the inspector's Name field, then a
+        // click on the viewer and a Return must each give the keyboard back to the editor.
+        if env["REFRAME_FOCUS_TEST"] != nil, let target = library.shots.first(where: { library.item(for: $0.clipPath) != nil }) {
+            library.openInEditor(target)
+            for _ in 0..<80 where viewer.activeShotID != target.id { try? await Task.sleep(for: .milliseconds(100)) }
+            try? await Task.sleep(for: .seconds(1))
+            func report(_ s: String) { FileHandle.standardError.write("focus test: \(s)\n".data(using: .utf8)!) }
+            func fields(_ v: NSView) -> [NSTextField] { (v as? NSTextField).map { [$0] } ?? [] + v.subviews.flatMap(fields) }
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.frame.width > 400 }),
+                  let name = viewer.activeShot?.name,
+                  let field = fields(window.contentView!).first(where: { $0.isEditable && $0.stringValue == name }) else {
+                report("no editable name field"); return
+            }
+            func editing() -> Bool { (window.firstResponder as? NSTextView)?.isFieldEditor == true }
+            func post(_ e: NSEvent?) { if let e { NSApp.postEvent(e, atStart: false) } }
+            window.makeFirstResponder(field)
+            report("focused: \(editing())")
+            // A click in the middle of the viewer area (window coordinates, origin bottom-left).
+            let p = NSPoint(x: window.frame.width * 0.45, y: window.frame.height * 0.7)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                post(NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+            report("after clicking the viewer, still editing: \(editing())")
+            window.makeFirstResponder(field)
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                post(NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                      windowNumber: window.windowNumber, context: nil, characters: "\r",
+                                      charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+            report("after Return, still editing: \(editing()), name '\(viewer.activeShot?.name ?? "?")'")
         }
         // REFRAME_RENAME_TEST=1: rename the first shot and back, reporting each step.
         if env["REFRAME_RENAME_TEST"] != nil, let shot = library.shots.first {

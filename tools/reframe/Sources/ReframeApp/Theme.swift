@@ -1,3 +1,4 @@
+import AppKit
 import ReframeKit
 import SwiftUI
 
@@ -22,6 +23,12 @@ enum Theme {
 extension View {
     /// Small secondary caption in the interface's plain voice.
     func caption() -> some View { font(.system(size: 11)).foregroundStyle(.secondary) }
+}
+
+/// Give up keyboard focus (a text field keeps it otherwise, so space would type instead of play).
+/// SwiftUI's focus state set to false doesn't reliably resign on macOS; this does.
+func endEditing() {
+    DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
 }
 
 func formatDuration(_ s: Double) -> String {

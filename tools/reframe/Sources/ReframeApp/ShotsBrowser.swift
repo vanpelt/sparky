@@ -268,8 +268,8 @@ struct ShotCard: View {
                 .font(Theme.title)
                 .focused($nameFocused)
                 .onAppear { draft = shot.name; nameFocused = true }
-                .onSubmit { commit() }
-                .onExitCommand { renaming = nil }
+                .onSubmit { commit(); endEditing() }
+                .onExitCommand { renaming = nil; endEditing() }
                 .onChange(of: nameFocused) { _, focused in if !focused && renaming == shot.id { commit() } }
                 .padding(.horizontal, 3)
                 .background(RoundedRectangle(cornerRadius: 3).fill(Color(nsColor: .textBackgroundColor)))

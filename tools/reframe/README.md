@@ -116,7 +116,8 @@ binary inside the bundle directly can leave the app without a window.
 `REFRAME_EXPORT_SHEET=1`, `REFRAME_EXPORT_AUTOSTART=1`, `REFRAME_BROWSE=shots` (with
 `REFRAME_SHOTS_SELECT=<n>` to select the first n), `REFRAME_OPEN_SHOT=<i>` (Open in Editor on the
 i-th shot, reports where the viewer lands), `REFRAME_RENAME_TEST=1` (renames the first shot and
-back), `REFRAME_DEBUG=1` (playback fps and window
+back), `REFRAME_FOCUS_TEST=1` (a click on the viewer and Return must take focus off the inspector's
+Name field), `REFRAME_DEBUG=1` (playback fps and window
 state to stderr), `REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal
 view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.
 

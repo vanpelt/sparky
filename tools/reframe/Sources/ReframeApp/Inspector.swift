@@ -53,7 +53,10 @@ private struct ShotSection: View {
                 .onChange(of: shot.id) { _, _ in name = shot.name }
                 .onChange(of: shot.name) { _, n in if !nameFocused { name = n } }
                 // Saves on Return and when you click away; an empty name puts the old one back.
-                .onSubmit { commitName() }
+                // Return saves and hands the keyboard back to the editor (space plays again);
+                // Esc puts the old name back.
+                .onSubmit { commitName(); endEditing() }
+                .onExitCommand { name = shot.name; endEditing() }
                 .onChange(of: nameFocused) { _, focused in if !focused { commitName() } }
                 .help("Rename this shot (also in the Shots view)")
             LabeledContent("In") {
