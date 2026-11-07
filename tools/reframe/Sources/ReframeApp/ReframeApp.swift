@@ -18,6 +18,19 @@ struct ReframeApp: App {
         .restorationBehavior(.disabled)  // always open the main window, even after a forced quit
         .defaultLaunchBehavior(.presented)
         .commands {
+            CommandGroup(replacing: .undoRedo) {
+                // Text fields keep their own undo; everywhere else undo edits to shots.
+                Button("Undo") {
+                    if NSApp.keyWindow?.firstResponder is NSText { NSApp.sendAction(Selector(("undo:")), to: nil, from: nil) }
+                    else { library.undo() }
+                }
+                .keyboardShortcut("z")
+                Button("Redo") {
+                    if NSApp.keyWindow?.firstResponder is NSText { NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }
+                    else { library.redo() }
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
             CommandGroup(after: .newItem) {
                 Button("Open Footage Folder…") { library.chooseFolder() }
                     .keyboardShortcut("o")

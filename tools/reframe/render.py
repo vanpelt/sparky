@@ -51,7 +51,8 @@ class Rig:
         scale = frame_size / canvas_w
         return ((cx - i * canvas_w) * scale).astype(np.float32), (cy * scale).astype(np.float32), angle, valid
 
-    def maps(self, body: np.ndarray, frame_size: int, omega: np.ndarray | None = None, rs_sign: float = 1.0):
+    def maps(self, body: np.ndarray, frame_size: int, omega: np.ndarray | None = None, rs_sign: float = 1.0,
+             rs_table: tuple[np.ndarray, np.ndarray] | None = None):
         """body rays (H,W,3) at mid-frame -> per-lens (map_x, map_y, weight).
 
         With omega (body rad/s), each source row is corrected for rolling shutter: a row read
@@ -60,7 +61,15 @@ class Rig:
         out, weights = [], []
         for i in range(2):
             mx, my, angle, valid = self._project(i, body, frame_size)
-            if omega is not None and self.readout_s:
+            if rs_table is not None and self.readout_s:
+                # Exact: each row gets the body pose at its own capture time (table of offsets).
+                offsets, rels = rs_table
+                for _ in range(2):
+                    dt = (my / frame_size - 0.5) * self.readout_s * rs_sign
+                    idx = np.clip(np.searchsorted(offsets, dt), 0, len(offsets) - 1)
+                    shifted = np.einsum("...ij,...j->...i", rels[idx], body)
+                    mx, my, angle, valid = self._project(i, shifted, frame_size)
+            elif omega is not None and self.readout_s:
                 for _ in range(2):  # fixed-point: row -> time -> rotated ray -> row
                     dt = (my / frame_size - 0.5) * self.readout_s * rs_sign
                     shifted = body - dt[..., None] * np.cross(omega, body)
@@ -73,11 +82,12 @@ class Rig:
         total[total == 0] = 1.0
         return [(mx, my, w / total) for (mx, my), w in zip(out, weights)]
 
-    def render(self, frames: list[np.ndarray], body: np.ndarray, omega=None, rs_sign: float = 1.0) -> np.ndarray:
+    def render(self, frames: list[np.ndarray], body: np.ndarray, omega=None, rs_sign: float = 1.0,
+               rs_table=None) -> np.ndarray:
         """frames: per video track, uint16 RGB. Returns float32 RGB 0..1."""
         size = frames[0].shape[0]
         acc = np.zeros(body.shape[:2] + (3,), np.float32)
-        for i, (mx, my, w) in enumerate(self.maps(body, size, omega, rs_sign)):
+        for i, (mx, my, w) in enumerate(self.maps(body, size, omega, rs_sign, rs_table)):
             src = frames[self.track_for_lens[i]]
             sampled = cv2.remap(src, mx, my, cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
             acc += sampled.astype(np.float32) * (w[..., None] / 65535.0)
@@ -155,11 +165,12 @@ def prores_writer(out: Path, width: int, height: int, fps: float, audio_src: Pat
 
 def render_clip(path: Path, start: float, duration: float, out: Path, *, width=1920, height=1080,
                 yaw=0.0, pitch=0.0, roll=0.0, hfov=90.0, stab="follow", smooth=0.8, rs=True,
-                rs_sign=1.0, decode_size=None, time_offset=0.0, audio=True, on_frame=None):
+                rs_sign=1.0, decode_size=None, time_offset=0.0, audio=True, on_frame=None,
+                tilt="mahony", rs_exact=False):
     rig = Rig(path)
     fps = frame_rate(path)
     n = int(round(duration * fps))
-    motion = Motion.from_insv(path, time_offset=time_offset)
+    motion = Motion.from_insv(path, time_offset=time_offset, tilt=tilt)
     times = start + np.arange(n) / fps
     views = view_rotations(motion, times, stab, smooth)
     body_rot = motion.at(times).as_matrix()  # body -> world
@@ -172,7 +183,13 @@ def render_clip(path: Path, start: float, duration: float, out: Path, *, width=1
         for k, frames in enumerate(zip(*streams)):
             world = cam @ views[k].T  # camera -> world
             body = world @ body_rot[k]  # world -> body (R^T, row-vector form)
-            img = rig.render(list(frames), body, omegas[k], rs_sign)
+            table = None
+            if rs and rs_exact:
+                offs = np.linspace(-rig.readout_s / 2, rig.readout_s / 2, 33)
+                r_mid = body_rot[k]
+                rels = np.einsum("nji,jk->nik", motion.at(times[k] + offs).as_matrix(), r_mid)  # R(t+dt)^T R(t)
+                table = (offs, rels)
+            img = rig.render(list(frames), body, omegas[k], rs_sign, table)
             if on_frame:
                 on_frame(k, img)
             if writer:

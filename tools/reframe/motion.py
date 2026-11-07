@@ -47,7 +47,14 @@ class Motion:
     _slerp: Slerp
 
     @classmethod
-    def from_insv(cls, path: Path, kp: float = 0.6, time_offset: float = 0.0) -> Motion:
+    def from_insv(cls, path: Path, kp: float = 0.6, time_offset: float = 0.0, tilt: str = "mahony",
+                  gravity_sigma: float = 3.0) -> Motion:
+        """tilt="mahony": gyro + causal accelerometer feedback (kp).
+        tilt="offline": pure gyro integration, then a zero-phase correction that levels the
+        heavily low-passed (gravity_sigma seconds) world-frame accelerometer. Vehicle braking and
+        cornering average out instead of tipping the horizon."""
+        if tilt == "offline":
+            kp = 0.0
         info, recs, _ = insv.read_info(path)
         g = insv.load_gyro(path, info, recs)
         t = video_time(g[:, 0], info) + time_offset
@@ -72,6 +79,17 @@ class Motion:
             q /= np.linalg.norm(q)
             quats[k] = q
         rot = Rotation.from_quat(quats)
+        if tilt == "offline":
+            up_w = rot.apply(acc)  # specific force (≈ up) in the gyro-integrated world frame
+            rate = 1 / np.median(np.diff(t))
+            smooth = gaussian_filter1d(up_w, sigma=gravity_sigma * rate, axis=0, mode="nearest")
+            smooth /= np.linalg.norm(smooth, axis=1, keepdims=True)
+            z = np.array([0.0, 0.0, 1.0])
+            axis = np.cross(smooth, z)
+            s = np.linalg.norm(axis, axis=1)
+            angle = np.arctan2(s, smooth @ z)
+            rotvec = np.where(s[:, None] > 1e-12, axis / np.maximum(s, 1e-12)[:, None] * angle[:, None], 0.0)
+            rot = Rotation.from_rotvec(rotvec) * rot
         return cls(t=t, rot=rot, omega=gyr, _slerp=Slerp(t, rot))
 
     def at(self, times: np.ndarray) -> Rotation:

@@ -11,6 +11,14 @@ struct ExportSheet: View {
     @AppStorage("export.resolve") private var resolve = true
     @AppStorage("export.finalCut") private var finalCut = true
     @AppStorage("export.destination") private var destinationPath = ""
+    @AppStorage("export.studioFPS") private var studioFPS = 24
+    @State private var studio: StudioSend = .idle
+    @State private var confirmQuitStudio = false
+    @State private var studioName = ""
+
+    enum StudioSend: Equatable {
+        case idle, working(String), done(String), failed(String)
+    }
 
     private var queue: ExportQueue { library.exports }
     private var destination: URL {
@@ -41,10 +49,36 @@ struct ExportSheet: View {
 
     // MARK: Settings
 
+    @ViewBuilder private func cloudSection(_ clips: [Clip]) -> some View {
+        let cloud = library.cloud
+        let records = clips.compactMap { CloudCache.record(for: $0.url) }
+        let total = records.reduce(Int64(0)) { $0 + $1.size }
+        let active = records.compactMap { cloud.fetching[$0.mediaId] }
+        Section {
+            LabeledContent {
+                if active.isEmpty {
+                    Button("Download Originals") { Task { await library.downloadOriginals(clips) } }
+                        .disabled(!cloud.isSignedIn)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+            } label: {
+                Text("\(clips.count) clip\(clips.count == 1 ? "'s" : "s'") original\(clips.count == 1 ? " is" : "s are") in Insta360 Cloud")
+                Text(active.first.map { "\($0.label) (\(records.count) left)" }
+                     ?? "Exporting files renders from the originals: \(formatBytes(total)) to download. Send to Studio doesn't need them: Studio streams cloud clips.")
+                let errs = records.compactMap { cloud.errors[$0.mediaId] }
+                if let e = errs.first { Text(e).foregroundStyle(.red) }
+            }
+        }
+    }
+
     private var settings: some View {
         let shots = exportable
         let total = shots.reduce(0) { $0 + $1.0.duration }
         let clips = Set(shots.map(\.1.url)).count
+        // Clips still in Insta360 Cloud: export renders the original, so it has to come down first.
+        var seen = Set<URL>()
+        let inCloud = shots.map(\.1).filter { seen.insert($0.url).inserted && CloudCache.isStub($0.url) }
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Export shots").font(.title3.weight(.semibold))
@@ -54,6 +88,7 @@ struct ExportSheet: View {
             .padding(20)
 
             Form {
+                if !inCloud.isEmpty { cloudSection(inCloud) }
                 Section {
                     LabeledContent("Save to") {
                         HStack {
@@ -87,10 +122,36 @@ struct ExportSheet: View {
                         Text("FCPXML with an event of selects and a project in shot order.")
                     }
                 }
+                Section("Insta360 Studio") {
+                    TextField("Project name", text: $studioName, prompt: Text(studioBaseName))
+                    Picker("Frame rate", selection: $studioFPS) {
+                        ForEach([24, 25, 30, 60], id: \.self) { Text("\($0) fps").tag($0) }
+                    }
+                    LabeledContent {
+                        if case .working = studio {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Send to Studio") {
+                                if StudioProject.isStudioRunning { confirmQuitStudio = true } else { sendToStudio(shots) }
+                            }
+                            .disabled(shots.isEmpty || !StudioProject.isStudioInstalled)
+                        }
+                    } label: {
+                        Text("Timeline project")
+                        studioCaption
+                    }
+                }
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
-            .frame(height: 400)
+            .frame(height: inCloud.isEmpty ? 570 : 660)
+            .onAppear { if studioName.isEmpty { studioName = StudioProject.availableName(studioBaseName) } }
+            .alert("Quit Insta360 Studio?", isPresented: $confirmQuitStudio) {
+                Button("Quit and Send") { sendToStudio(shots) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Studio has to be closed while Reframe adds the project. It may ask you to save first; Reframe reopens it afterwards.")
+            }
 
             HStack {
                 Spacer()
@@ -100,7 +161,7 @@ struct ExportSheet: View {
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.sightline)
-                    .disabled(shots.isEmpty)
+                    .disabled(shots.isEmpty || !inCloud.isEmpty)
             }
             .padding(20)
         }
@@ -115,6 +176,63 @@ struct ExportSheet: View {
         let title = "Reframe \(library.folder?.lastPathComponent ?? "selects")"
         queue.start(.init(shots: shots, options: options, lut: lut, resolveTimeline: resolve,
                           finalCutTimeline: finalCut, title: title))
+    }
+
+    @ViewBuilder private var studioCaption: some View {
+        switch studio {
+        case .idle:
+            let requested = studioRequestedName, name = StudioProject.availableName(requested)
+            if !StudioProject.isStudioInstalled {
+                Text("Insta360 Studio isn't installed.")
+            } else if name != requested {
+                Text("Studio already has “\(requested)”, so this one will be “\(name)”.")
+            } else {
+                Text("The shots on a new 16:9 timeline over the original .insv files, with your framing as keyframes. Nothing is rendered.")
+            }
+        case .working(let m): Text(m)
+        case .done(let name): Text("Added “\(name)” to Studio's projects.").foregroundStyle(Theme.sightline)
+        case .failed(let m): Text(m).foregroundStyle(.red)
+        }
+    }
+
+    private var studioBaseName: String { "Reframe \(library.folder?.lastPathComponent ?? "selects")" }
+
+    /// The typed name, made safe as a folder name (falls back to the default).
+    private var studioRequestedName: String {
+        let n = studioName.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return n.isEmpty || n.hasPrefix(".") ? studioBaseName : n
+    }
+
+    /// Writes the shots as a Studio timeline project (quitting Studio first if needed), then opens Studio.
+    /// A taken name gets " 2", " 3"... so an existing project is never overwritten.
+    private func sendToStudio(_ shots: [(Shot, Clip)]) {
+        let fps = Double(studioFPS)
+        let base = studioRequestedName
+        studio = .working("Preparing \(shots.count) shot\(shots.count == 1 ? "" : "s")…")
+        Task {
+            if StudioProject.isStudioRunning {
+                studio = .working("Waiting for Studio to quit…")
+                guard await StudioProject.quitStudio() else {
+                    studio = .failed("Studio is still open. Quit it and try again.")
+                    return
+                }
+            }
+            studio = .working("Writing the project…")
+            let result = await Task.detached { () -> Result<String, Error> in
+                let items = shots.compactMap { StudioProject.Item(shot: $0.0, clip: $0.1) }
+                let name = StudioProject.availableName(base)
+                return Result { try StudioProject.write(name: name, items: items, fps: fps, register: true); return name }
+            }.value
+            switch result {
+            case .success(let name):
+                StudioProject.openStudio()
+                studio = .done(name)
+                studioName = StudioProject.availableName(base)
+            case .failure(let e):
+                studio = .failed((e as? StudioProject.Failure)?.description ?? e.localizedDescription)
+            }
+        }
     }
 
     private func chooseDestination() {

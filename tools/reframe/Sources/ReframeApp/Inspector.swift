@@ -10,6 +10,7 @@ struct Inspector: View {
         if let item {
             Form {
                 if let shot = viewer.activeShot { ShotSection(shot: shot, viewer: viewer) }
+                if let s = viewer.selectedSuggestion { SuggestionSection(suggestion: s, viewer: viewer) }
                 FramingSection(viewer: viewer)
                 Section("Stabilization") {
                     Picker("Mode", selection: $viewer.stabilization) {
@@ -23,6 +24,7 @@ struct Inspector: View {
                     }
                     Toggle("Correct rolling shutter", isOn: $viewer.rollingShutter)
                 }
+                SuggestionsSection()
                 ClipSection(item: item)
             }
             .formStyle(.grouped)
@@ -53,13 +55,15 @@ private struct ShotSection: View {
             }
             LabeledContent("Length") { Text(formatDuration(shot.duration)).font(Theme.numeric(12)) }
             ForEach(shot.keyframes) { k in
+                let current = viewer.currentKeyframe?.id == k.id
                 HStack(spacing: 8) {
-                    Image(systemName: "diamond.fill").font(.system(size: 8)).foregroundStyle(Theme.sightline)
+                    Image(systemName: current ? "diamond.fill" : "diamond").font(.system(size: 8)).foregroundStyle(Theme.sightline)
                     Button(formatTimecode(k.time, fps: viewer.fps)) { viewer.scrub(to: k.time, final: true) }
                         .buttonStyle(.plain)
-                        .help("Go to this keyframe")
+                        .fontWeight(current ? .semibold : .regular)
+                        .help("Select this keyframe: the playhead moves to it, and changing the view edits it")
                     Spacer()
-                    Text(String(format: "%+.0f°  %.0f° fov", k.framing.yaw, k.framing.hfov))
+                    Text(String(format: "%+.0f°  %@", k.framing.yaw, k.framing.preset?.label ?? String(format: "%.0f°", k.framing.hfov)))
                         .foregroundStyle(.secondary)
                     if shot.keyframes.count > 1 {
                         Button { viewer.removeKeyframe(k.id) } label: { Image(systemName: "minus.circle") }
@@ -68,8 +72,66 @@ private struct ShotSection: View {
                     }
                 }
                 .font(Theme.numeric(11))
+                .opacity(shot.contains(k.time) ? 1 : 0.45)
+                .help(shot.contains(k.time) ? "" : "Outside the shot after a trim: it still shapes the path, and returns if you extend the shot")
             }
             Button("Delete Shot", role: .destructive) { viewer.deleteActiveShot() }
+        }
+    }
+}
+
+/// Why a moment was suggested, and the two things you can do with it.
+private struct SuggestionSection: View {
+    let suggestion: Suggestion
+    @Bindable var viewer: ViewerModel
+
+    /// "Pans over 3 keyframes, Mega" or "Holds still, Dewarp".
+    private var cameraSummary: String {
+        let k = suggestion.keyframes.count
+        let move = suggestion.stabilization == .follow ? "Looks ahead" : k <= 1 ? "Holds still" : "Pans over \(k) keyframes"
+        return "\(move), \(suggestion.lens.label)"
+    }
+
+    var body: some View {
+        Section("Suggested shot") {
+            LabeledContent("In") {
+                Button(formatTimecode(suggestion.inTime, fps: viewer.fps)) { viewer.scrub(to: suggestion.inTime, final: true) }
+                    .buttonStyle(.plain).font(Theme.numeric(12)).help("Go to this point")
+            }
+            LabeledContent("Peak") {
+                Button(formatTimecode(suggestion.peakTime, fps: viewer.fps)) { viewer.scrub(to: suggestion.peakTime, final: true) }
+                    .buttonStyle(.plain).font(Theme.numeric(12)).help("Go to the most interesting moment")
+            }
+            LabeledContent("Length") { Text(formatDuration(suggestion.duration)).font(Theme.numeric(12)) }
+            LabeledContent("Camera") { Text(cameraSummary).foregroundStyle(.secondary) }
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Why")
+                let rows = suggestion.contributions.sorted { abs($0.value) > abs($1.value) }.prefix(6)
+                let top = max(rows.map { abs($0.value) }.max() ?? 1, 1e-3)
+                ForEach(Array(rows), id: \.key) { signal, value in
+                    HStack(spacing: 8) {
+                        Text(signal.phrase.prefix(1).uppercased() + signal.phrase.dropFirst())
+                            .font(.system(size: 11))
+                            .foregroundStyle(value < 0 ? .tertiary : .secondary)
+                            .frame(width: 92, alignment: .leading)
+                        GeometryReader { geo in
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(Color.primary.opacity(value < 0 ? 0.15 : 0.5))
+                                .frame(width: max(2, geo.size.width * abs(value) / top))
+                        }
+                        .frame(height: 5)
+                    }
+                    .help(value < 0 ? "Counts against this moment" : "Counts toward this moment")
+                }
+            }
+            HStack {
+                Button("Keep as Shot") { viewer.acceptSuggestion() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.sightline)
+                    .help("Turn it into a shot you can edit and export (A)")
+                Button("Dismiss") { viewer.dismissSuggestion() }
+                    .help("Hide this suggestion (X)")
+            }
         }
     }
 }
@@ -81,15 +143,28 @@ private struct FramingSection: View {
         Section("Framing") {
             row("Yaw", value: \.yaw, range: -180...180)
             row("Pitch", value: \.pitch, range: -89...89)
-            row("Field of view", value: \.hfov, range: 20...160)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Lens")
+                LensPresetPicker(current: viewer.displayFraming) { viewer.apply($0) }
+                Text(lensSummary).caption()
+            }
             HStack {
                 Button("Reset") { viewer.resetFraming() }
                 Spacer()
-                if viewer.activeShot != nil {
-                    Text(viewer.followPath ? "Following keyframes" : "Steering by hand").caption()
+                if viewer.currentKeyframe != nil {
+                    Text("Editing this keyframe").caption()
+                } else if viewer.editsKeyframe {
+                    Text("Changes add a keyframe here").caption()
                 }
             }
         }
+    }
+
+    private var lensSummary: String {
+        let f = viewer.displayFraming
+        let name = f.preset?.label ?? "Custom"
+        return String(format: "%@: %g° field of view, distortion %.2f, covers %.0f° across", name,
+                      (f.hfov * 10).rounded() / 10, f.distortion, f.coverage)
     }
 
     private func row(_ title: String, value: WritableKeyPath<Framing, Double>, range: ClosedRange<Double>) -> some View {
@@ -103,6 +178,42 @@ private struct FramingSection: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 34, alignment: .trailing)
             }
+        }
+    }
+}
+
+/// What suggestions favour, for every clip. Re-ranks instantly from cached analysis.
+private struct SuggestionsSection: View {
+    @Environment(Library.self) private var library
+
+    var body: some View {
+        Section("Suggestions") {
+            Picker("Favor", selection: Binding(get: { library.preset }, set: { library.setPreset($0) })) {
+                ForEach(InterestWeights.Preset.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text(library.preset.summary).caption()
+        }
+    }
+}
+
+extension InterestWeights.Preset {
+    var label: String {
+        switch self {
+        case .blend: return "Blend"
+        case .people: return "People"
+        case .action: return "Action"
+        case .scenery: return "Scenery"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .blend: return "A mix of people, action and scenery."
+        case .people: return "Faces, voices and laughter come first."
+        case .action: return "Movement, jumps, impacts and loud moments come first."
+        case .scenery: return "Views that stand out and new places, with the Linear lens when nobody is in frame."
         }
     }
 }

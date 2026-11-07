@@ -1,16 +1,87 @@
 import Foundation
 
-/// Where the virtual camera looks, relative to the stabilized view base.
+/// Where the virtual camera looks, relative to the stabilized view base, and through what lens.
 public struct Framing: Codable, Hashable, Sendable {
     public var yaw: Double
     public var pitch: Double
+    /// Field of view in degrees, as Insta360 Studio defines it: the rectilinear angle that sets
+    /// the focal length. With distortion > 0 the frame actually covers more (see `coverage`).
     public var hfov: Double
+    /// Projection: 0 = rectilinear (straight lines stay straight) ... 1 = stereographic.
+    /// This is the unified camera model's xi, i.e. the virtual camera pulled back from the
+    /// sphere's centre by `distortion` radii.
+    public var distortion: Double
 
-    public init(yaw: Double, pitch: Double, hfov: Double) {
+    public init(yaw: Double, pitch: Double, hfov: Double, distortion: Double = LensPreset.dewarp.distortion) {
         self.yaw = yaw
         self.pitch = pitch
         self.hfov = hfov
+        self.distortion = distortion
     }
+
+    public init(yaw: Double, pitch: Double, preset: LensPreset) {
+        self.init(yaw: yaw, pitch: pitch, hfov: preset.fov, distortion: preset.distortion)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        yaw = try c.decode(Double.self, forKey: .yaw)
+        pitch = try c.decode(Double.self, forKey: .pitch)
+        hfov = try c.decode(Double.self, forKey: .hfov)
+        distortion = try c.decodeIfPresent(Double.self, forKey: .distortion) ?? 0  // shots saved before presets
+    }
+
+    /// Horizontal angle the frame really covers, in degrees (equals hfov when distortion is 0).
+    public var coverage: Double {
+        let t = tan(hfov * .pi / 360), d = distortion
+        let k = (d + sqrt(1 + (1 - d * d) * t * t)) / (t * t + 1)
+        return 2 * atan2(k * t, k - d) * 180 / .pi
+    }
+
+    /// Vertical angle covered by a frame of `aspect` = height / width (e.g. 9/16).
+    public func verticalCoverage(aspect: Double) -> Double {
+        let t = tan(hfov * .pi / 360) * aspect, d = distortion
+        let k = (d + sqrt(1 + (1 - d * d) * t * t)) / (t * t + 1)
+        return 2 * atan2(k * t, k - d) * 180 / .pi
+    }
+
+    public var preset: LensPreset? { LensPreset.allCases.first { $0.matches(self) } }
+
+    public mutating func apply(_ p: LensPreset) {
+        hfov = p.fov
+        distortion = p.distortion
+    }
+}
+
+/// Insta360 Studio's reframing lenses (field of view, distortion).
+public enum LensPreset: String, CaseIterable, Identifiable, Codable, Sendable {
+    case mega, ultra, dewarp, linear
+    public var id: String { rawValue }
+    public var label: String {
+        switch self {
+        case .mega: return "Mega"
+        case .ultra: return "Ultra"
+        case .dewarp: return "Dewarp"
+        case .linear: return "Linear"
+        }
+    }
+    public var fov: Double {
+        switch self {
+        case .mega: return 80
+        case .ultra: return 69.5
+        case .dewarp: return 88
+        case .linear: return 110
+        }
+    }
+    public var distortion: Double {
+        switch self {
+        case .mega, .ultra: return 0.95
+        case .dewarp: return 0.40
+        case .linear: return 0
+        }
+    }
+    public var framing: Framing { Framing(yaw: 0, pitch: 0, preset: self) }
+    public func matches(_ f: Framing) -> Bool { abs(f.hfov - fov) < 0.05 && abs(f.distortion - distortion) < 0.005 }
 }
 
 public struct Keyframe: Codable, Hashable, Sendable, Identifiable {
@@ -38,6 +109,10 @@ public struct Shot: Codable, Hashable, Sendable, Identifiable {
     public var smoothing: Double
     public var lockTime: Double
     public var created = Date()
+    /// The suggestion this shot was kept from, if any (nil for shots you marked yourself).
+    public var suggestionID: String?
+    /// The path as suggested, kept for evaluation: how far you re-aimed it.
+    public var suggestedKeyframes: [Keyframe]?
 
     public init(clipPath: String, name: String, inTime: Double, outTime: Double, framing: Framing,
                 stabilization: Motion.Stabilization, smoothing: Double, lockTime: Double) {
@@ -68,6 +143,23 @@ public struct Shot: Codable, Hashable, Sendable, Identifiable {
         }
     }
 
+    /// Keyframes inside the shot's range (trimming keeps the others, so the path is unchanged).
+    public var keyframesInRange: [Keyframe] { keyframes.filter { contains($0.time) } }
+
+    /// Merge keyframes closer than `spacing` seconds: each run becomes one keyframe at its first
+    /// time with its last framing (the later one is usually the edit that was meant).
+    public mutating func mergeCloseKeyframes(within spacing: Double) {
+        var out: [Keyframe] = []
+        for k in keyframes {
+            if let last = out.last, k.time - last.time < spacing {
+                out[out.count - 1].framing = k.framing
+            } else {
+                out.append(k)
+            }
+        }
+        keyframes = out
+    }
+
     public mutating func removeKeyframe(_ id: Keyframe.ID) {
         guard keyframes.count > 1 else { return }
         keyframes.removeAll { $0.id == id }
@@ -77,7 +169,7 @@ public struct Shot: Codable, Hashable, Sendable, Identifiable {
     /// (eases in and out of the first and last keyframe), yaw unwrapped so it takes the short way.
     public func framing(at t: Double) -> Framing {
         let k = keyframes
-        guard let first = k.first else { return Framing(yaw: 0, pitch: 0, hfov: 100) }
+        guard let first = k.first else { return LensPreset.dewarp.framing }
         if k.count == 1 || t <= first.time { return first.framing }
         if t >= k[k.count - 1].time { return k[k.count - 1].framing }
 
@@ -103,7 +195,8 @@ public struct Shot: Codable, Hashable, Sendable, Identifiable {
         if yaw > 180 { yaw -= 360 } else if yaw < -180 { yaw += 360 }
         return Framing(yaw: yaw,
                        pitch: min(max(hermite { k[$0].framing.pitch }, -89), 89),
-                       hfov: min(max(hermite { k[$0].framing.hfov }, 20), 160))
+                       hfov: min(max(hermite { k[$0].framing.hfov }, 20), 160),
+                       distortion: min(max(hermite { k[$0].framing.distortion }, 0), 1))
     }
 }
 
@@ -113,8 +206,17 @@ extension Motion.Stabilization: Codable {}
 public struct ShotStore: Codable, Sendable {
     public var version = 1
     public var shots: [Shot] = []
+    /// Suggestion IDs the user dismissed, so they don't come back after re-analysis.
+    public var dismissed: Set<String> = []
 
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        shots = try c.decodeIfPresent([Shot].self, forKey: .shots) ?? []
+        dismissed = try c.decodeIfPresent(Set<String>.self, forKey: .dismissed) ?? []
+    }
 
     static func url(for folder: URL) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

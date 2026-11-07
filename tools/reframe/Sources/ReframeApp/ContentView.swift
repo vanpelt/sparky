@@ -20,6 +20,8 @@ struct ContentView: View {
                     Divider()
                     TimelinePane(viewer: viewer)
                 }
+            } else if let url = library.selection, library.selectedItem == nil, library.cloud.media(for: url) != nil {
+                CloudFetchView(url: url)
             } else {
                 emptyState
             }
@@ -34,22 +36,31 @@ struct ContentView: View {
         .navigationSubtitle(library.folder?.lastPathComponent ?? "")
         .tint(Theme.sightline)
         .sheet(isPresented: $showExport) { ExportSheet() }
-        .onChange(of: library.selection, initial: true) { _, _ in
+        .onChange(of: library.preset) { _, _ in
+            // Suggestions were re-ranked: a previewed one may no longer exist.
+            if viewer.activeShotID == nil { viewer.deselectShot() }
+            if let item = library.selectedItem { library.refreshSuggestionThumbnails(for: item) }
+        }
+        // Keyed on the item, not the selection: a cloud clip's item appears once it's fetched.
+        .onChange(of: library.selectedItem?.id, initial: true) { _, _ in
             viewer.library = library
             viewer.load(library.selectedItem?.clip)
+            if let item = library.selectedItem { library.refreshSuggestionThumbnails(for: item) }
         }
         .onAppear { installKeys() }
         .onDisappear { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
         .task { await debugHooks() }
     }
 
+    private var noFootage: Bool { library.items.isEmpty && library.cloud.media.isEmpty }
+
     private var emptyState: some View {
         ContentUnavailableView {
-            Label(library.items.isEmpty ? "No footage yet" : "Choose a clip", systemImage: "camera.metering.spot")
+            Label(noFootage ? "No footage yet" : "Choose a clip", systemImage: "camera.metering.spot")
         } description: {
-            Text(library.items.isEmpty ? "Open a folder of Insta360 .insv recordings to start." : "Pick a clip from the sidebar.")
+            Text(noFootage ? "Open a folder of Insta360 .insv recordings, or connect Insta360 Cloud, to start." : "Pick a clip from the sidebar.")
         } actions: {
-            if library.items.isEmpty {
+            if library.items.isEmpty && library.cloud.media.isEmpty {
                 Button("Open Footage Folder…") { library.chooseFolder() }.buttonStyle(.borderedProminent)
             }
         }
@@ -101,7 +112,16 @@ struct ContentView: View {
             case (_, "i"): viewer.markIn()
             case (_, "o"): viewer.markOut()
             case (_, "k"): viewer.addKeyframe()
+            case (_, "a") where viewer.targetSuggestion != nil: viewer.acceptSuggestion()
+            case (_, "x") where viewer.targetSuggestion != nil: viewer.dismissSuggestion()
             case (_, "f"): viewer.projection = viewer.projection == .flat ? .equirect : .flat
+            case (_, "m"): viewer.muted.toggle()
+            case (_, "1"): viewer.apply(.mega)
+            case (_, "2"): viewer.apply(.ultra)
+            case (_, "3"): viewer.apply(.dewarp)
+            case (_, "4"): viewer.apply(.linear)
+            case (51, _) where viewer.currentKeyframe != nil, (117, _) where viewer.currentKeyframe != nil:
+                viewer.removeCurrentKeyframe()  // delete: the keyframe at the playhead
             case (53, _): viewer.deselectShot()  // esc
             default: return event
             }
@@ -112,13 +132,26 @@ struct ContentView: View {
     /// Environment-driven hooks for headless checks:
     /// REFRAME_SELECT=<name substring>, REFRAME_PROJECTION=equirect, REFRAME_YAW=<deg>,
     /// REFRAME_AUTOPLAY=1, REFRAME_SEEK=<s>, REFRAME_DEMO_SHOT=1, REFRAME_EXPORT_SHEET=1,
+    /// REFRAME_SUGGESTION=1 (preview the best suggested shot; =last the latest one; =accept keeps the best),
+    /// REFRAME_SELFTEST=1 (keyframe editing, trims and undo; results on stderr),
+    /// REFRAME_PRESET=people|action|scenery (this launch only),
     /// REFRAME_SNAPSHOT=<path.png> (also writes <path>-viewer.png).
     private func debugHooks() async {
         let env = ProcessInfo.processInfo.environment
         if let name = env["REFRAME_SELECT"] {
-            for _ in 0..<100 {
+            for _ in 0..<150 {
                 if let item = library.items.first(where: { $0.clip.name.contains(name) }) {
                     library.selection = item.id
+                    break
+                }
+                // A cloud recording not fetched yet: selecting it fetches it, then waits for it.
+                if let m = library.cloud.media.first(where: { $0.name.contains(name) }) {
+                    library.selection = library.cloud.url(for: m)
+                    for _ in 0..<1200 where library.selectedItem == nil { try? await Task.sleep(for: .milliseconds(100)) }
+                    if env["REFRAME_DEBUG"] != nil {
+                        let stub = library.selectedItem.map { CloudCache.isStub($0.clip.url) } ?? false
+                        FileHandle.standardError.write("cloud select: \(m.name) -> item \(library.selectedItem != nil), stub \(stub), error \(library.cloud.errors[m.id] ?? "none")\n".data(using: .utf8)!)
+                    }
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -128,16 +161,33 @@ struct ContentView: View {
         if env["REFRAME_PROJECTION"] == "equirect" { viewer.projection = .equirect }
         if let yaw = env["REFRAME_YAW"].flatMap(Double.init) { viewer.manual.yaw = yaw }
         if env["REFRAME_DEMO_SHOT"] != nil, viewer.clip != nil {
-            viewer.manual = Framing(yaw: env["REFRAME_YAW"].flatMap(Double.init) ?? 0, pitch: -8, hfov: 100)
+            viewer.manual = Framing(yaw: env["REFRAME_YAW"].flatMap(Double.init) ?? 0, pitch: -8, preset: .dewarp)
             viewer.scrub(to: 12, final: true)
             if let shot = viewer.newShot(from: 12, to: 30) {
                 var s = shot
-                s.setKeyframe(at: 20, framing: Framing(yaw: s.keyframes[0].framing.yaw + 150, pitch: 0, hfov: 80))
-                s.setKeyframe(at: 28, framing: Framing(yaw: s.keyframes[0].framing.yaw + 175, pitch: -10, hfov: 110))
+                s.setKeyframe(at: 20, framing: Framing(yaw: s.keyframes[0].framing.yaw + 150, pitch: 0, preset: .mega))
+                s.setKeyframe(at: 28, framing: Framing(yaw: s.keyframes[0].framing.yaw + 175, pitch: -10, preset: .linear))
                 library.update(s)
                 viewer.select(s)
             }
         }
+        if let p = env["REFRAME_PRESET"].flatMap(InterestWeights.Preset.init(rawValue:)) {
+            library.setPreset(p, persist: false)
+            try? await Task.sleep(for: .seconds(1))
+        }
+        if env["REFRAME_SUGGESTION"] != nil {
+            for _ in 0..<100 where viewer.suggestions.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+            let pick = env["REFRAME_SUGGESTION"] == "last" ? viewer.suggestions.max(by: { $0.inTime < $1.inTime })
+                : viewer.suggestions.max(by: { $0.score < $1.score })
+            if let s = pick {
+                viewer.select(s)
+                if env["REFRAME_SUGGESTION"] == "accept" { viewer.acceptSuggestion() }
+            }
+            if env["REFRAME_DEBUG"] != nil {
+                FileHandle.standardError.write("suggestion hook: \(viewer.suggestions.count) suggestions, picked \(pick?.id ?? "none"), active shot \(viewer.activeShot?.suggestionID ?? "none"), shots \(library.shots.count)\n".data(using: .utf8)!)
+            }
+        }
+        if env["REFRAME_SELFTEST"] != nil { selfTest() }
         if let t = env["REFRAME_SEEK"].flatMap(Double.init) { viewer.scrub(to: t, final: true) }
         if env["REFRAME_AUTOPLAY"] != nil { viewer.togglePlay() }
         if env["REFRAME_EXPORT_SHEET"] != nil { showExport = true }
@@ -148,6 +198,79 @@ struct ContentView: View {
     }
 }
 
+extension ContentView {
+    /// REFRAME_SELFTEST=1: exercises keyframe editing, trimming and undo through the same calls the
+    /// mouse and keys make, prints PASS/FAIL lines to stderr, then undoes everything.
+    func selfTest() {
+        func check(_ name: String, _ ok: Bool) {
+            FileHandle.standardError.write("selftest \(ok ? "PASS" : "FAIL"): \(name)\n".data(using: .utf8)!)
+        }
+        guard viewer.clip != nil else { check("clip loaded", false); return }
+        let before = library.shots
+        viewer.scrub(to: 10, final: true)
+        guard let shot = viewer.newShot(from: 10, to: 15) else { check("new shot", false); return }
+        let base = shot.keyframes[0].framing.yaw
+        check("new shot has one keyframe at its in point", viewer.activeShot?.keyframes.count == 1)
+
+        // Edit between keyframes: adds one at the playhead, leaves the first alone.
+        viewer.scrub(to: 13, final: true)
+        viewer.beginManualEdit(); viewer.manual.yaw = base + 40
+        var s = viewer.activeShot!
+        check("editing between keyframes adds a keyframe there", s.keyframes.count == 2 && abs(s.keyframes[1].time - 13) < 0.01)
+        check("the first keyframe is unchanged", abs(s.keyframes[0].framing.yaw - base) < 0.01)
+        check("view shows the edit", abs(viewer.displayFraming.yaw - (base + 40)) < 0.5)
+
+        // Near an existing keyframe (inside the on-screen spacing): edit it, don't stack another.
+        let near = 13 + viewer.keyframeSpacing * 0.6
+        viewer.scrub(to: near, final: true)
+        check("a keyframe a few points away counts as selected", viewer.currentKeyframe?.time == 13)
+        viewer.beginManualEdit(); viewer.manual.yaw = base + 50
+        s = viewer.activeShot!
+        check("editing near a keyframe edits it (no stacked keyframe)", s.keyframes.count == 2 && abs(s.keyframes[1].framing.yaw - (base + 50)) < 0.01)
+        check("the playhead snaps onto that keyframe", abs(viewer.currentTime - 13) < 1e-6)
+        viewer.scrub(to: near, final: true)
+        viewer.addKeyframe()
+        check("K near a keyframe selects it instead of adding one", viewer.activeShot!.keyframes.count == 2 && abs(viewer.currentTime - 13) < 1e-6)
+        viewer.moveKeyframe(viewer.activeShot!.keyframes[1].id, to: 10.01, final: true)
+        check("a dragged keyframe stops short of its neighbour", viewer.activeShot!.keyframes[1].time >= 10 + viewer.keyframeSpacing - 1e-6)
+        viewer.moveKeyframe(viewer.activeShot!.keyframes[1].id, to: 13, final: true)
+
+        // Select the first keyframe (playhead on it) and edit: only it changes.
+        viewer.scrub(to: 10, final: true)
+        check("keyframe at playhead is selected", viewer.currentKeyframe?.id == s.keyframes[0].id)
+        viewer.beginManualEdit(); viewer.manual.yaw = base - 30; viewer.apply(.mega)
+        s = viewer.activeShot!
+        check("editing a selected keyframe changes it", abs(s.keyframes[0].framing.yaw - (base - 30)) < 0.01 && s.keyframes[0].framing.preset == .mega)
+        check("other keyframes keep their framing", abs(s.keyframes[1].framing.yaw - (base + 50)) < 0.01 && s.keyframes[1].framing.preset != .mega)
+        check("no extra keyframes", s.keyframes.count == 2)
+
+        // Retime, trim, delete.
+        viewer.moveKeyframe(s.keyframes[1].id, to: 14, final: true)
+        check("keyframe moved", abs(viewer.activeShot!.keyframes[1].time - 14) < 0.01 && abs(viewer.currentTime - 14) < 0.01)
+        viewer.moveEdge(of: shot.id, isIn: false, to: 18, final: true)
+        check("out point dragged", abs(viewer.activeShot!.outTime - 18) < 0.01)
+        viewer.moveEdge(of: shot.id, isIn: true, to: 17.9, final: true)
+        check("in point clamps to keep 0.5 s", abs(viewer.activeShot!.inTime - 17.5) < 0.01)
+        viewer.scrub(to: 14, final: true)
+        check("delete removes the keyframe at the playhead", viewer.removeCurrentKeyframe() && viewer.activeShot!.keyframes.count == 1)
+
+        // Outside any shot the view is free and nothing is written.
+        viewer.scrub(to: 30, final: true)
+        let snapshot = library.shots
+        viewer.beginManualEdit(); viewer.manual.yaw += 25
+        check("editing outside a shot writes nothing", library.shots == snapshot)
+
+        // Undo all of it.
+        for _ in 0..<40 where library.shots != before { library.undo() }
+        check("undo restores the shots", library.shots == before)
+        library.redo()
+        check("redo works", library.shots != before)
+        library.undo()
+        viewer.deselectShot()
+        check("back to the original shots", library.shots == before)
+    }
+}
+
 // MARK: - Sidebar
 
 struct Sidebar: View {
@@ -155,17 +278,35 @@ struct Sidebar: View {
 
     var body: some View {
         @Bindable var library = library
+        ScrollViewReader { proxy in
         List(selection: $library.selection) {
             ForEach(library.days, id: \.day) { day in
                 Section(day.day == Calendar.current.startOfDay(for: .distantPast) ? "Undated"
                         : day.day.formatted(.dateTime.weekday(.wide).month(.wide).day())) {
-                    ForEach(day.items) { item in
-                        ClipRow(item: item, shotCount: library.shots(for: item.clip).count).tag(item.id)
+                    ForEach(day.rows) { row in
+                        Group {
+                            if let item = row.item {
+                                ClipRow(item: item, shotCount: library.shots(for: item.clip).count)
+                            } else if let m = row.media {
+                                CloudClipRow(media: m)
+                            }
+                        }
+                        .tag(row.id)
+                        .id(row.id)
+                        .contextMenu { if row.media != nil || row.item?.isCloud == true { cloudMenu(row) } }
                     }
                 }
             }
         }
         .listStyle(.sidebar)
+        .onChange(of: library.selection) { _, sel in
+            if let sel { withAnimation { proxy.scrollTo(sel) } }
+        }
+        .onChange(of: library.selectedItem?.id) { _, sel in
+            // Fetched cloud clips and late-loading folders shift the rows: scroll again.
+            if let sel { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { withAnimation { proxy.scrollTo(sel, anchor: .center) } } }
+        }
+        }
         .overlay {
             if library.items.isEmpty && library.loading { ProgressView() }
         }
@@ -179,12 +320,171 @@ struct Sidebar: View {
                 .help("Open a different footage folder (⌘O)")
                 Spacer()
                 if library.loading { ProgressView().controlSize(.mini) }
+                CloudButton()
+                Menu {
+                    Picker("Sort clips", selection: $library.sortByInterest) {
+                        Text("By recording time").tag(false)
+                        Text("Best moments first").tag(true)
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(library.sortByInterest ? "Best moments first within each day" : "By recording time within each day")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
         }
     }
 }
+
+extension Sidebar {
+    @ViewBuilder func cloudMenu(_ row: Library.Row) -> some View {
+        if let item = row.item {
+            if item.originalInCloud, let r = CloudCache.record(for: item.clip.url) {
+                Button("Download Original (\(formatBytes(r.size)))") {
+                    Task { await library.downloadOriginals([item.clip]) }
+                }
+            }
+            Button("Remove Downloaded Files") { library.removeCloudCache(item) }
+        } else {
+            Button("Fetch from Cloud") { library.selection = row.id }
+        }
+        Divider()
+        Button("Fetch All Cloud Clips") { library.fetchAllCloudClips() }
+    }
+}
+
+/// A recording that is only in Insta360 Cloud so far: its cloud cover, length and size.
+struct CloudClipRow: View {
+    @Environment(Library.self) private var library
+    let media: CloudMedia
+
+    var body: some View {
+        let stage = library.cloud.fetching[media.id]
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack {
+                Rectangle().fill(Theme.surround)
+                if let thumb = library.cloud.thumbnails[media.id] {
+                    Image(decorative: thumb, scale: 1).resizable().aspectRatio(2, contentMode: .fill).opacity(0.7)
+                }
+                if stage != nil { ProgressView().controlSize(.small) }
+            }
+            .aspectRatio(2, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(alignment: .bottomTrailing) {
+                if let d = media.duration {
+                    Text(formatDuration(d))
+                        .font(Theme.numeric(10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+                        .padding(5)
+                }
+            }
+            .overlay(alignment: .topTrailing) { CloudBadge(originalInCloud: true).padding(5) }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(media.captureDate.map { $0.formatted(date: .omitted, time: .shortened) } ?? media.name)
+                    .font(Theme.title)
+                Text(stage?.label ?? library.cloud.errors[media.id].map { _ in "Couldn't fetch" }
+                     ?? ([media.fps.map { "\(Int($0.rounded()))p" }, media.size.map(formatBytes)].compactMap { $0 }
+                            .joined(separator: ", ")))
+                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.vertical, 5)
+        .task(id: media.thumbnailURL) { library.cloud.loadThumbnail(media) }
+    }
+}
+
+struct CloudBadge: View {
+    let originalInCloud: Bool
+
+    var body: some View {
+        Image(systemName: originalInCloud ? "cloud" : "checkmark.icloud")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(3)
+            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
+            .help(originalInCloud ? "In Insta360 Cloud: browsing from its low-res proxy; the original downloads when you export."
+                  : "From Insta360 Cloud; the original is downloaded.")
+    }
+}
+
+/// Sidebar footer control: connect, refresh, fetch all, sign out.
+struct CloudButton: View {
+    @Environment(Library.self) private var library
+
+    var body: some View {
+        let cloud = library.cloud
+        Group {
+            if cloud.isSignedIn {
+                Menu {
+                    if let q = cloud.quota {
+                        Text(String(format: "%.0f of %.0f GB used", q.used, q.total))
+                    }
+                    if case .failed(let m) = cloud.state { Text(m) }
+                    Button("Refresh") { Task { await cloud.refresh() } }
+                    Button("Fetch All Cloud Clips") { library.fetchAllCloudClips() }
+                    Divider()
+                    Button("Sign Out of Insta360 Cloud") { cloud.signOut() }
+                } label: {
+                    if cloud.state == .loading || !cloud.fetching.isEmpty {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: { if case .failed = cloud.state { return "exclamationmark.icloud" } else { return "icloud" } }())
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Insta360 Cloud: \(cloud.media.count) recordings")
+            } else {
+                Button { cloud.beginSignIn() } label: { Image(systemName: "icloud.slash") }
+                    .buttonStyle(.borderless)
+                    .help("Connect Insta360 Cloud to browse recordings without downloading them")
+            }
+        }
+    }
+}
+
+/// The main pane while a cloud recording is fetched (or failed to).
+struct CloudFetchView: View {
+    @Environment(Library.self) private var library
+    let url: URL
+
+    var body: some View {
+        let cloud = library.cloud
+        let m = cloud.media(for: url)
+        let id = m?.id ?? ""
+        ContentUnavailableView {
+            Label(m?.name ?? url.lastPathComponent, systemImage: "icloud.and.arrow.down")
+        } description: {
+            if let stage = cloud.fetching[id] {
+                VStack(spacing: 8) {
+                    Text(stage.label)
+                    if let f = stage.fraction { ProgressView(value: f).frame(width: 240) } else { ProgressView().controlSize(.small) }
+                    Text("Only the gyro and the low-res proxy come down; the original stays in the cloud until you export.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let err = cloud.errors[id] {
+                Text(err)
+            } else {
+                Text("Fetching from Insta360 Cloud…")
+            }
+        } actions: {
+            if cloud.errors[id] != nil {
+                Button("Try Again") { library.retryCloudFetch() }.buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
+func formatBytes(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
 
 struct ClipRow: View {
     let item: ClipItem
@@ -210,6 +510,9 @@ struct ClipRow: View {
                     .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 3))
                     .padding(5)
             }
+            .overlay(alignment: .topTrailing) {
+                if item.isCloud { CloudBadge(originalInCloud: item.originalInCloud).padding(5) }
+            }
             .overlay(alignment: .bottomLeading) {
                 if shotCount > 0 {
                     HStack(spacing: 3) {
@@ -223,6 +526,11 @@ struct ClipRow: View {
                     .help("\(shotCount) shot\(shotCount == 1 ? "" : "s") marked")
                 }
             }
+            if !item.interest.isEmpty {
+                InterestSparkline(values: item.interest)
+                    .frame(height: 10)
+                    .help(sparklineHelp)
+            }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(item.clip.captureDate.map { $0.formatted(date: .omitted, time: .shortened) } ?? item.clip.name)
                     .font(Theme.title)
@@ -234,10 +542,39 @@ struct ClipRow: View {
         .padding(.vertical, 5)
     }
 
+    private var sparklineHelp: String {
+        let n = item.analysis?.suggestions.count ?? 0
+        let best = item.analysis?.suggestions.first.map { " The best is \($0.title.lowercased()) at \(formatDuration($0.peakTime))." } ?? ""
+        return "Interest over the clip: \(n) suggested shot\(n == 1 ? "" : "s").\(best)"
+    }
+
     private var subtitle: String {
         let info = item.clip.info
         if info.isTimelapse { return "Timelapse" }
         return "\(info.colorLabel), \(info.nominalFPS ?? 0)p"
+    }
+}
+
+/// Interest across a clip as a quiet filled curve (plain ink: color belongs to the sightline).
+struct InterestSparkline: View {
+    let values: [Float]
+
+    var body: some View {
+        Canvas { ctx, size in
+            guard values.count > 1 else { return }
+            let cols = max(Int(size.width / 2), 2)
+            var p = Path()
+            p.move(to: CGPoint(x: 0, y: size.height))
+            for c in 0..<cols {
+                let a = c * values.count / cols, b = max(a + 1, (c + 1) * values.count / cols)
+                let v = CGFloat(values[a..<min(b, values.count)].max() ?? 0)
+                p.addLine(to: CGPoint(x: CGFloat(c) / CGFloat(cols - 1) * size.width, y: size.height * (1 - v)))
+            }
+            p.addLine(to: CGPoint(x: size.width, y: size.height))
+            p.closeSubpath()
+            ctx.fill(p, with: .color(.primary.opacity(0.35)))
+        }
+        .accessibilityLabel("Interest over the clip")
     }
 }
 
@@ -253,6 +590,12 @@ struct ViewerPane: View {
             MetalViewer(model: viewer, renderer: library.renderer)
                 .aspectRatio(viewer.projection == .flat ? 16.0 / 9.0 : 2, contentMode: .fit)
                 .overlay(alignment: .bottomLeading) { hud }
+                .overlay(alignment: .bottomTrailing) {
+                    LensPresetPicker(current: viewer.displayFraming, compact: true) { viewer.apply($0) }
+                        .padding(3)
+                        .background(.black.opacity(0.45), in: Capsule())
+                        .padding(10)
+                }
                 .overlay {
                     if viewer.projection == .equirect { aimMarker }
                 }
@@ -266,11 +609,12 @@ struct ViewerPane: View {
         return HStack(spacing: 12) {
             Text(String(format: "%+.0f°", f.yaw)).help("Yaw: left is positive")
             Text(String(format: "%+.0f°", f.pitch)).help("Pitch")
-            Text(String(format: "%.0f° fov", f.hfov)).help("Horizontal field of view")
-            if viewer.activeShot != nil {
-                Image(systemName: viewer.followPath ? "diamond.fill" : "hand.draw")
-                    .foregroundStyle(viewer.followPath ? Theme.sightline : .white)
-                    .help(viewer.followPath ? "Following the shot's keyframes" : "Steering by hand: press K to keyframe")
+            Text(f.preset?.label ?? String(format: "%.0f°", f.hfov)).help(String(format: "Covers %.0f° across", f.coverage))
+            if viewer.editsKeyframe {
+                let on = viewer.currentKeyframe != nil
+                Image(systemName: on ? "diamond.fill" : "diamond")
+                    .foregroundStyle(Theme.sightline)
+                    .help(on ? "On a keyframe: changing the view edits it" : "Between keyframes: changing the view adds one here")
             }
         }
         .font(Theme.numeric(11))
@@ -284,10 +628,11 @@ struct ViewerPane: View {
     private var aimMarker: some View {
         GeometryReader { geo in
             let f = viewer.displayFraming
-            let w = geo.size.width * f.hfov / 360
+            let w = geo.size.width * f.coverage / 360
+            let h = geo.size.height * f.verticalCoverage(aspect: 9 / 16) / 180
             RoundedRectangle(cornerRadius: 3)
                 .strokeBorder(Theme.sightline, lineWidth: 1.5)
-                .frame(width: w, height: w * 9 / 16)
+                .frame(width: w, height: h)
                 .position(x: geo.size.width / 2, y: geo.size.height * (0.5 - f.pitch / 180))
                 .allowsHitTesting(false)
         }

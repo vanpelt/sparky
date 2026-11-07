@@ -33,13 +33,21 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   Flat (16:9) or 360°; in 360°, click to aim the flat camera. Stabilization: Off / Follow / Lock.
   Scrubbing decodes from the proxy; playback streams the 8K master in real time
   (both 3840² 10-bit lens tracks at 48 fps on an M6).
-- **Horizon scan:** under the viewer, x is time and y is heading (the whole horizon, levelled
-  and heading-locked to where the camera faced at the start). The line through it is where the
-  camera looks. Click to jump there *and* look there; drag to scrub. The ribbon underneath is
-  gyro speed, so calm stretches are easy to spot.
-- **Shots:** N starts a shot at the playhead (5 s), I and O set its ends, K keyframes the current
-  framing. Between keyframes the camera eases along a smooth path; dragging the view steers by
-  hand until you press K. Shots are saved per footage folder in
+- **Timeline lanes:** a **filmstrip** of frames seen through the current framing (or the active
+  shot's keyframed path), so you can judge what an export will look like; and a **heading lane**
+  where x is time and y is direction relative to where the camera faced at the start (Left /
+  Ahead / Right / Behind). The line is where the camera looks. Click the lane to jump there *and*
+  look there; drag either lane to scrub. The ribbon underneath is gyro speed, so calm stretches
+  are easy to spot. The heading lane also carries the interest heat (below).
+- **Audio:** the clip's audio plays in sync and acts as the playback clock (video frames are paced
+  to it). M mutes.
+- **Shots:** N starts a 5 s shot at the playhead, I and O set its ends, or Shift-drag across the
+  heading lane to mark one; drag a shot's edge in the lane to trim it. Inside a shot, changing
+  the view (drag, zoom, lens, sliders, or clicking the lane) edits the keyframe under the
+  playhead, or adds one there. Click a keyframe (its diamond in the lane or its row in the
+  inspector) to select it, drag a diamond to move it in time, and press Delete to remove it. K pins
+  the current view as a keyframe. Between keyframes the camera eases along a smooth path. ⌘Z / ⇧⌘Z
+  undo and redo shot edits. Shots are saved per footage folder in
   `~/Library/Application Support/Reframe/projects/` (the footage folder is never written).
 - **Export (⌘E):** ProRes 422 HQ / 422 / LT, 10-bit 4:2:2, at HD, 4K UHD, vertical or square,
   with 24-bit source audio and a time-of-day timecode track. Each frame is rendered straight into
@@ -48,12 +56,42 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   - **DaVinci Resolve:** OpenTimelineIO (`.otio`). Import it with File › Import › Timeline.
   - **Final Cut Pro:** FCPXML 1.10, with an event of selects and a project in shot order.
   Exports stay in I-Log unless you choose to bake the preview look in.
+- **Send to Insta360 Studio** (in the export sheet): writes the shots as a new Studio timeline
+  project over the original `.insv` files, with the framing as keyframes, and renders nothing.
+  Studio must be closed while its project list is written, so Reframe asks to quit it and reopens
+  it afterwards. You choose the project name (a taken name gets " 2") and the timeline's frame
+  rate (24 fps by default). Headless: `reframe-cli studio <footage-folder> <name> [--register]
+  [--fps 24]`. See "Insta360 Studio projects" below for the format.
+- **Suggested shots (interest map):** each clip is analyzed in the background from its audio,
+  gyro and proxy frames: faces and people (Vision, on six world-locked views), movement in the
+  scene, laughter, cheering and speech (Apple's sound classifier), jumps and impacts, and junk
+  (dark, covered lens), plus scenery that stands out and arriving somewhere new. It runs at
+  3–7% of real time and is cached. The inspector's Suggestions section picks what to favour (Blend,
+  People, Action or Scenery) and re-ranks every clip instantly. The heading lane shows interest as heat
+  over time *and* direction. Suggested shots appear as dashed spans and tiles with their reasons;
+  each comes with a camera path (keyframes that follow the people or action, plus pitch and
+  lens). Click one to preview it along its path, then press A to keep it as a normal shot, X to
+  dismiss it, or K to keep it and add a keyframe. Hover the lane to see what's at a spot ("2 faces,
+  laughter"). The sidebar shows an interest sparkline per clip and can sort each day by best
+  moments first. `reframe-cli analyze <clip or folder> [--json] [--heat] [--stills dir --lut x.cube]
+  [--preset people|action|scenery]` prints every signal and suggestion and renders each
+  suggestion's peak frame. `reframe-cli evaluate <footage folder>` scores every preset against the
+  shots you kept and the suggestions you dismissed (recall, aim, keep rate). See `INTEREST_MAP.md`.
 - **LUTs:** reads `.cube` files from `~/Downloads/X6_I-Log_LUTs` (File → Choose LUT Folder).
   They apply to the preview of I-Log clips only and are never baked into exports unless you ask.
   The LUT files are Insta360's and are not in the repo.
 
-Keys: Space play/pause, ←/→ step a frame (⇧ for 10), N new shot, I/O in/out, K keyframe,
-F toggle frame/360°, Esc leave the shot, ⌘E export, ⌘O open folder.
+- **Lens presets:** Insta360 Studio's reframing lenses, as field of view and distortion:
+  Mega (80°, 0.95), Ultra (69.5°, 0.95), Dewarp (88°, 0.40, the default) and Linear (110°, 0).
+  Distortion is the unified camera model's ξ: 0 is rectilinear, and values toward 1 approach
+  stereographic. So Mega actually covers about 155° across, Ultra 135°, Dewarp 120° and Linear 110°.
+  Keyframes store the lens, so a shot can ease from Dewarp to Mega. Scroll or pinch fine-tunes
+  the angle (shown as Custom).
+
+Keys: Space play/pause, ←/→ step a frame (⇧ for 10), N new shot, I/O in/out, K keyframe, Delete remove
+the keyframe at the playhead, ⌘Z/⇧⌘Z undo/redo,
+A keep a suggested shot, X dismiss it,
+1–4 Mega/Ultra/Dewarp/Linear, F toggle frame/360°, Esc leave the shot, ⌘E export, ⌘O open folder.
 
 `reframe-cli export clip.insv 14 20 out/ --yaw 180 --hfov 100` exports one shot headlessly. On an M6,
 1080p exports run at about 190 fps (4× real time). Exported frames match the Python reference at
@@ -64,9 +102,31 @@ LaunchServices (`open -n -F --env KEY=value --stderr log.txt .build/Reframe.app`
 binary inside the bundle directly can leave the app without a window.
 `REFRAME_SELECT=<name substring>`, `REFRAME_PROJECTION=equirect`, `REFRAME_YAW=<deg>`,
 `REFRAME_SEEK=<s>`, `REFRAME_AUTOPLAY=1`, `REFRAME_DEMO_SHOT=1` (a keyframed shot at 0:12–0:30),
+`REFRAME_SUGGESTION=1` (preview the best suggestion; `=last` the latest; `=accept` keeps the best),
+`REFRAME_PRESET=people|action|scenery` (this launch only), `REFRAME_SELFTEST=1`
+(keyframe editing, trims and undo, PASS/FAIL on stderr, undone afterwards),
 `REFRAME_EXPORT_SHEET=1`, `REFRAME_EXPORT_AUTOSTART=1`, `REFRAME_DEBUG=1` (playback fps and window
 state to stderr), `REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal
 view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.
+
+## Insta360 Cloud
+
+Recordings in Insta360 Cloud sit in the sidebar beside the open folder's, on the same days, with a
+cloud badge (a local copy of the same file wins). Connect with the cloud button at the bottom of the
+sidebar: Insta360's own sign-in page opens and you sign in there; Reframe keeps only the session
+token (30 days, renewed automatically).
+
+Selecting a cloud recording fetches just enough to work on it: the original's trailer (gyro,
+calibration, metadata; a few to ~25 MB) and the low-res LRV proxy (~6% of the original). Playback,
+analysis, suggestions and shots then work as for local clips, from the proxy. Exporting files needs
+the originals: the export sheet lists the clips still in the cloud and downloads them first (also in
+a cloud clip's context menu). Send to Studio doesn't: it references them as cloud media, which
+Studio streams. "Fetch All Cloud Clips" fetches every proxy in the background.
+
+Cache: `~/Library/Application Support/Reframe/Cloud/<mediaId>/`; cloud clips' shots are kept in
+their own store, so they don't depend on the open folder (and move to a local copy once one shows
+up in the folder). This uses the private API Insta360 Studio uses; see [CLOUD.md](CLOUD.md).
+`reframe-cli cloud login|status|list|probe|fetch [--original]|logout` drive it from the terminal.
 
 ## Python reference
 
@@ -92,6 +152,29 @@ Stabilization modes (`--stab`):
 - `lock`: horizon level, heading held where it was on the first frame.
 
 Rolling-shutter correction is on by default (`--no-rs` disables it).
+
+## Insta360 Studio projects (Studio 6.0.8)
+
+Studio has no scripting interface, but its timelines are plain JSON:
+`~/Documents/Insta360/Studio/TimelineProject/<name>/<uuid>.insproj`, listed in
+`~/Library/Application Support/Insta360/Insta360 Studio/nle/pro.insproj` (Studio rewrites that list
+while running; Reframe keeps the original as `pro.insproj.reframe-backup`). Measured against
+projects Studio saved and frames matched against Reframe renders:
+
+- Every frame number counts at the project's rate, whatever each clip was shot at: a clip has
+  `floor(duration × project fps)` frames (Studio showed a 48 fps clip's 342 frames as 11.4 s on a
+  30 fps timeline). With `autoFps` on, Studio takes the first clip's rate (48 fps → 24, 29.97 → 30);
+  Reframe writes the rate chosen in the export sheet (24 by default, `--fps` in the CLI) with
+  `autoFps` off. Trims are frames cut from each end; keyframe times are source frames.
+- Keyframe `fov` is the vertical field of view of the 16:9 frame (radians) and `distance` is
+  Reframe's lens distortion, so Mega/Ultra/Dewarp/Linear carry over exactly.
+- Keyframe pan is a **world direction**: left-positive, zero where the camera faced on the file's
+  first frame, interpolated in a straight line between keyframes. Reframe converts with
+  `pan = view-base heading + yaw − heading at t=0` (within 2° on six test frames) and adds
+  keyframes wherever the camera turns enough that Studio's interpolation would drift from the
+  shot by more than 2°. Lock and Off shots export as plain Studio stabilization.
+- Not handled yet: clip transitions (no saved example), aspect ratios other than 16:9, cameras
+  other than the X6.
 
 ## What we know about X6 files (firmware v1.2.36)
 
@@ -124,15 +207,33 @@ Residual motion from `stabcheck.py` (median optical flow, px/frame at 640px wide
 | ... with rolling-shutter sign flipped | 2.9 |
 | ... without the field-28 adjustment (default now) | 0.58 |
 
-Orientation is gyro integration with a weak accelerometer pull toward gravity (Mahony, kp 0.6,
-only when |a| is within 15% of 1 g), so roll and pitch cannot drift.
+Orientation is pure gyro integration, levelled offline: the world-frame accelerometer is
+smoothed over ±3 s (zero-phase), so braking, cornering and vibration average out instead of
+tipping the horizon. Rolling shutter is corrected per row from a 17-step pose table across the
+readout. The original causal accelerometer filter (Mahony) left a median ~8.5° of horizon error
+on a handlebar-mounted clip.
+
+"Jitter" (`stabcheck.py --stab-study`) is the high-frequency part of the global image motion in
+the upper half of a follow-mode view, with smooth pans and forward travel removed. RMS px/frame
+at 640 wide, 4 s:
+
+| Variant | Bike (handlebar) | UTV (selfie stick) |
+| --- | ---: | ---: |
+| none (camera-fixed) | 2.52 | 2.44 |
+| Mahony tilt, linear rolling shutter (previous) | 0.65 | 0.62 |
+| offline tilt, linear rolling shutter | 0.19 | 0.41 |
+| **offline tilt, per-row rolling shutter (current, Swift and Python)** | **0.10** | **0.41** |
+
+The viewer presents frames at the clip's own rate while playing (48 Hz on a ProMotion display),
+so a 48 fps clip doesn't judder on a 60 Hz cadence.
 
 ## Known limits
 - Seam blending is a plain angular feather: near objects ghost and the two lenses' exposures
   do not match across the seam. Views that stay inside one lens look clean.
+- Not yet compared head to head with FlowState on the same clip (needs a Studio export).
 - Only rotation is stabilized. Hand/vehicle translation and its parallax remain, as with FlowState.
-- The gravity pull assumes accelerations average out. Long sustained turns in a vehicle can tilt
-  the horizon slightly; a forward-backward smoother over the whole clip would fix that.
+- Levelling assumes accelerations average out over ±3 s. A sustained turn longer than that
+  (a long banked curve) can still tilt the horizon slightly.
 - Python/numpy renderer runs ~0.4 s per 1080p frame and is for validation only; the real
   pipeline is planned as Metal + VideoToolbox.
 

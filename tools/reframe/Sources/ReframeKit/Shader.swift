@@ -11,7 +11,8 @@
 //   frame:
 //     64-72 body<-camera rotation, row-major   73 focal (px, flat)   74 projection (0 flat, 1 equirect)
 //     75 rolling-shutter readout (s, 0 = off)  76-78 body angular velocity (rad/s)
-//     79 seam blend belt (deg)   80 look (0 log, 1 LUT)   81 LUT size
+//     79 seam blend belt (deg)   80 look (0 log, 1 LUT)   81 LUT size   82 projection distortion (0...1)
+//     83 rolling-shutter row-table size (0 = linear)   96...: row poses, 9 floats each, row-major
 let reframeShaderSource = #"""
 #include <metal_stdlib>
 using namespace metal;
@@ -52,9 +53,12 @@ inline float3 shade(float2 pos, float W, float H, texture2d<float> luma0, textur
                     texture2d<float> luma1, texture2d<float> chroma1, constant float *P) {
     float3 cam;
     if (P[74] < 0.5f) {
-        float f = P[73];
+        // Inverse unified camera model: d = 0 rectilinear ... d = 1 stereographic.
+        float f = P[73], d = P[82];
         float u = (pos.x - W * 0.5f) / f, v = (pos.y - H * 0.5f) / f;
-        cam = float3(1, -u, -v);  // forward +X, right -Y, down -Z
+        float r2 = u * u + v * v;
+        float k = (d + sqrt(1 + (1 - d * d) * r2)) / (r2 + 1);
+        cam = float3(k - d, -k * u, -k * v);  // forward +X, right -Y, down -Z
     } else {
         float lon = pos.x / W * 2 * M_PI_F - M_PI_F;
         float lat = M_PI_F * 0.5f - pos.y / H * M_PI_F;
@@ -74,9 +78,24 @@ inline float3 shade(float2 pos, float W, float H, texture2d<float> luma0, textur
         float angle; bool valid;
         float2 px = projectLens(L, toLens(L, body), angle, valid);
         if (readout > 0) {
+            int rows = int(P[83]);
             for (int it = 0; it < 2; it++) {  // source row -> capture time -> rotated ray
-                float dt = (px.y / L[31] - 0.5f) * readout;
-                px = projectLens(L, toLens(L, body - dt * cross(omega, body)), angle, valid);
+                float3 b;
+                if (rows > 1) {  // exact: interpolate the per-row pose table
+                    float fi = clamp(px.y / L[31], 0.0f, 1.0f) * (rows - 1);
+                    int i0 = min(int(fi), rows - 2);
+                    float a = fi - i0;
+                    constant float *R0 = P + 96 + i0 * 9, *R1 = R0 + 9;
+                    float3 b0 = float3(dot(float3(R0[0], R0[1], R0[2]), body), dot(float3(R0[3], R0[4], R0[5]), body),
+                                       dot(float3(R0[6], R0[7], R0[8]), body));
+                    float3 b1 = float3(dot(float3(R1[0], R1[1], R1[2]), body), dot(float3(R1[3], R1[4], R1[5]), body),
+                                       dot(float3(R1[6], R1[7], R1[8]), body));
+                    b = mix(b0, b1, a);
+                } else {  // linear: constant angular velocity across the frame
+                    float dt = (px.y / L[31] - 0.5f) * readout;
+                    b = body - dt * cross(omega, body);
+                }
+                px = projectLens(L, toLens(L, b), angle, valid);
             }
         }
         bool inside = valid && px.x >= L[27] && px.x <= L[28] - 1 && px.y >= 0 && px.y <= L[31] - 1;

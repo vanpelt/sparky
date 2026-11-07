@@ -39,6 +39,10 @@ struct MetalViewer: NSViewRepresentable {
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
+            // Present at the footage's own rate while playing (48 fps on a ProMotion display
+            // avoids the uneven 48-in-60 cadence that reads as shake); 60 when idle for smooth dragging.
+            let want = model.isPlaying ? max(model.fps, 24) : 60
+            if view.preferredFramesPerSecond != want { view.preferredFramesPerSecond = want }
             guard let clip = model.clip, let frames = model.engine.latest,
                   let drawable = view.currentDrawable,
                   let cb = renderer.queue.makeCommandBuffer() else { return }
@@ -46,6 +50,7 @@ struct MetalViewer: NSViewRepresentable {
             var settings = ViewSettings()
             settings.projection = model.projection
             settings.hfov = framing.hfov
+            settings.distortion = framing.distortion
             settings.applyLUT = model.showLUT && clip.info.colorProfile == "I_Log"
             if let motion = clip.motion {
                 let t = frames.time
@@ -55,6 +60,7 @@ struct MetalViewer: NSViewRepresentable {
                 if model.rollingShutter {
                     settings.readout = clip.rig.readoutSeconds
                     settings.angularVelocity = motion.angularVelocity(at: t)
+                    settings.rowRotations = motion.rowRotations(at: t, readout: clip.rig.readoutSeconds)
                 }
             }
             if let path = model.debugCapturePath {  // debug: same view, rendered offscreen

@@ -35,7 +35,13 @@ extension Data {
     }
 }
 
-final class BinaryFile {
+/// Random access to a file's bytes: local (`BinaryFile`) or remote (`RemoteFile`, HTTP ranges).
+public protocol ByteSource: AnyObject {
+    var size: UInt64 { get }
+    func read(at offset: UInt64, count: Int) throws -> Data
+}
+
+final class BinaryFile: ByteSource {
     let handle: FileHandle
     let size: UInt64
 
@@ -56,7 +62,7 @@ final class BinaryFile {
 
 private let signature = Data("8db42d694ccc418790edff439fe026bf".utf8)
 
-func readRecords(_ file: BinaryFile) throws -> [InsvRecord] {
+func readRecords(_ file: ByteSource) throws -> [InsvRecord] {
     let size = file.size
     let term = try file.read(at: size - 72, count: 72)
     guard term.count == 72, term.subdata(in: 40..<72) == signature else { throw InsvError.noSignature }
@@ -268,11 +274,17 @@ public struct IMUData: Sendable {
 public final class InsvFile: @unchecked Sendable {
     public let url: URL
     public let info: InsvInfo
-    private let file: BinaryFile
+    private let file: ByteSource
 
-    public init(url: URL) throws {
+    public convenience init(url: URL) throws {
+        try self.init(url: url, source: BinaryFile(url))
+    }
+
+    /// Reads the trailer from any byte source (e.g. a cloud original via HTTP ranges); `url` is
+    /// only an identifier then.
+    public init(url: URL, source: ByteSource) throws {
         self.url = url
-        file = try BinaryFile(url)
+        file = source
         let records = try readRecords(file)
         guard let meta = records.first(where: { $0.id == 1 && $0.format == 1 }) else { throw InsvError.noMetadata }
         let m = decodeProtobuf(try file.read(at: meta.offset, count: meta.length))

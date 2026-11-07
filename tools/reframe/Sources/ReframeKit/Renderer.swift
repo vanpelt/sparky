@@ -75,9 +75,14 @@ public struct ViewSettings: Sendable {
     public var projection: Projection = .flat
     public var bodyFromCamera = simd_double3x3(diagonal: [1, 1, 1])
     public var hfov: Double = 90
+    /// Flat-view projection: 0 rectilinear ... 1 stereographic (see Framing.distortion).
+    public var distortion: Double = 0
     public var angularVelocity = SIMD3<Double>.zero
     /// Rolling-shutter readout in seconds; 0 disables correction.
     public var readout: Double = 0
+    /// Exact per-row poses across the readout (Motion.rowRotations). When set, used instead of
+    /// the linear angular-velocity approximation.
+    public var rowRotations: [simd_double3x3] = []
     public var applyLUT = false
     public var seamBelt: Double = 6
 
@@ -144,7 +149,7 @@ public final class ReframeRenderer: @unchecked Sendable {
     }
 
     private func parameters(_ frames: LensFrames, rig: Rig, view: ViewSettings, width: Int) -> [Float] {
-        var p = rig.lensParameters(frames) + [Float](repeating: 0, count: 32)
+        var p = rig.lensParameters(frames) + [Float](repeating: 0, count: 32 + 160)
         let m = view.bodyFromCamera
         for row in 0..<3 { for col in 0..<3 { p[64 + row * 3 + col] = Float(m[col][row]) } }
         p[73] = Float(Double(width) / 2 / tan(view.hfov * .pi / 360))
@@ -154,6 +159,12 @@ public final class ReframeRenderer: @unchecked Sendable {
         p[79] = Float(view.seamBelt)
         p[80] = view.applyLUT && lut != nil ? 1 : 0
         p[81] = Float(lutSize)
+        p[82] = Float(min(max(view.distortion, 0), 1))
+        let rows = view.readout > 0 ? Array(view.rowRotations.prefix(17)) : []
+        p[83] = Float(rows.count)
+        for (i, r) in rows.enumerated() {
+            for row in 0..<3 { for col in 0..<3 { p[96 + i * 9 + row * 3 + col] = Float(r[col][row]) } }
+        }
         return p
     }
 

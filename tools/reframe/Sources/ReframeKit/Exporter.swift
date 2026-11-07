@@ -71,12 +71,13 @@ public struct ExportedShot: Sendable {
 }
 
 public enum ExportError: LocalizedError {
-    case noMotion, decode(String), writer(String)
+    case noMotion, decode(String), writer(String), originalInCloud(String)
     public var errorDescription: String? {
         switch self {
         case .noMotion: return "This clip has no gyro data, so it can't be stabilized."
         case .decode(let s): return "Couldn't read the source: \(s)"
         case .writer(let s): return "Couldn't write the file: \(s)"
+        case .originalInCloud(let s): return "\(s) is still in Insta360 Cloud: download its original first."
         }
     }
 }
@@ -94,6 +95,7 @@ public final class ShotExporter: @unchecked Sendable {
                        progress: @escaping @Sendable (Double) -> Void,
                        isCancelled: @escaping @Sendable () -> Bool) async throws -> ExportedShot {
         guard let motion = clip.motion else { throw ExportError.noMotion }
+        guard !CloudCache.isStub(clip.url) else { throw ExportError.originalInCloud(clip.url.lastPathComponent) }
         let reader = try await FrameReader(url: clip.url)
         let fd = reader.frameDuration
         let seq = try reader.sequence(from: shot.inTime, to: shot.outTime)
@@ -215,12 +217,14 @@ public final class ShotExporter: @unchecked Sendable {
                 let f = shot.framing(at: t)
                 var view = ViewSettings()
                 view.hfov = f.hfov
+                view.distortion = f.distortion
                 view.applyLUT = options.bakeLook && clip.info.colorProfile == "I_Log"
                 view.bodyFromCamera = motion.bodyFromCamera(at: t, mode: shot.stabilization, smoothing: shot.smoothing,
                                                             lockTime: shot.lockTime, yaw: f.yaw, pitch: f.pitch, roll: 0)
                 if options.rollingShutter {
                     view.readout = clip.rig.readoutSeconds
                     view.angularVelocity = motion.angularVelocity(at: t)
+                    view.rowRotations = motion.rowRotations(at: t, readout: clip.rig.readoutSeconds)
                 }
                 let keep = renderer.encodeYUV422(cb, frames: frames, rig: clip.rig, view: view, into: pb)
                 cb.commit()

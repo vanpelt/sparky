@@ -7,6 +7,8 @@ public final class Motion: @unchecked Sendable {
     public let times: [Double]  // video-timeline seconds of each IMU sample
     let quats: [simd_quatd]
     let omega: [SIMD3<Double>]  // body rad/s
+    /// Magnitude of the specific force (g) per IMU sample: ~1 at rest, ~0 in free fall.
+    public let forceMagnitude: [Float]
 
     // Heading grid for follow mode, sampled at `gridRate`.
     private let gridRate = 200.0
@@ -18,7 +20,11 @@ public final class Motion: @unchecked Sendable {
     /// X5 raw IMU axes -> body (per insta360-rs); verified on X6 for gravity and gyro.
     @inline(__always) static func imuToBody(_ v: SIMD3<Double>) -> SIMD3<Double> { SIMD3(v.y, v.z, v.x) }
 
-    public init(info: InsvInfo, imu: IMUData, kp: Double = 0.6) {
+    /// Orientation = gyro integration, levelled by an offline (zero-phase) gravity estimate:
+    /// the world-frame accelerometer averaged over `gravitySigma` seconds either side. Braking,
+    /// cornering and vibration average out instead of tipping the horizon (a causal accelerometer
+    /// filter left ~8° of horizon error and 3× the jitter on a handlebar-mounted clip; see README).
+    public init(info: InsvInfo, imu: IMUData, gravitySigma: Double = 3) {
         // Camera clock -> video time. Field 28 (gyro adjust) is deliberately not applied: X6
         // footage was steadiest without it. Timelapse: capture time runs interval*fps faster.
         let base = Double(info.firstFrameTimestamp ?? 0) / (info.rawIMU ? 1e6 : 1e3)
@@ -39,19 +45,16 @@ public final class Motion: @unchecked Sendable {
         var quats = [simd_quatd](repeating: q, count: t.count)
         for k in 1..<max(t.count, 1) {
             let dt = t[k] - t[k - 1]
-            var w = gyr[k] / speed  // angular velocity in video time
-            let a = acc[k], n = simd_length(a)
-            if kp > 0, n > 0.85, n < 1.15 {
-                let upEst = q.inverse.act([0, 0, 1])
-                w += kp * simd_cross(a / n, upEst)
-            }
+            let w = gyr[k] / speed  // angular velocity in video time
             let angle = simd_length(w) * dt
             if angle > 1e-12 { q = simd_normalize(q * simd_quatd(angle: angle, axis: simd_normalize(w))) }
             quats[k] = q
         }
+        Motion.levelOffline(&quats, times: t, accel: acc, sigma: gravitySigma)
         times = t
         self.quats = quats
         omega = gyr.map { $0 / speed }
+        forceMagnitude = acc.map { Float(simd_length($0)) }
 
         if let first = t.first, let last = t.last, last > first {
             gridStart = first
@@ -69,6 +72,57 @@ public final class Motion: @unchecked Sendable {
                 grid[i] = prev
             }
             headingGrid = grid
+        }
+    }
+
+    /// Re-level gyro-integrated orientations: bin world-frame specific force at 100 Hz, smooth it
+    /// (three box passes ≈ Gaussian, O(n)), and rotate each pose so the smoothed "up" is +Z.
+    static func levelOffline(_ quats: inout [simd_quatd], times t: [Double], accel: [SIMD3<Double>], sigma: Double) {
+        guard let first = t.first, let last = t.last, last > first, sigma > 0 else { return }
+        let rate = 100.0
+        let n = Int((last - first) * rate) + 1
+        var sums = [SIMD3<Double>](repeating: .zero, count: n)
+        var counts = [Int](repeating: 0, count: n)
+        for k in 0..<t.count {
+            let b = min(max(Int((t[k] - first) * rate), 0), n - 1)
+            sums[b] += quats[k].act(accel[k])
+            counts[b] += 1
+        }
+        var grid = [SIMD3<Double>](repeating: [0, 0, 1], count: n)
+        var carry = SIMD3<Double>(0, 0, 1)
+        for i in 0..<n {
+            if counts[i] > 0 { carry = sums[i] / Double(counts[i]) }
+            grid[i] = carry
+        }
+        // Three box passes of width w approximate a Gaussian of `sigma` seconds.
+        let s = sigma * rate
+        let w = max(1, Int((12 * s * s / 3 + 1).squareRoot()) | 1)
+        for _ in 0..<3 {
+            var out = grid
+            var acc = SIMD3<Double>.zero
+            let r = w / 2
+            for i in -r...(r) { acc += grid[min(max(i, 0), n - 1)] }
+            for i in 0..<n {
+                out[i] = acc / Double(w)
+                acc += grid[min(i + r + 1, n - 1)] - grid[max(i - r, 0)]
+            }
+            grid = out
+        }
+        for k in 0..<t.count {
+            let x = min(max((t[k] - first) * rate, 0), Double(n - 1))
+            let i = Int(x), j = min(i + 1, n - 1)
+            let up = simd_normalize(grid[i] + (grid[j] - grid[i]) * (x - Double(i)))
+            quats[k] = simd_normalize(simd_quatd(from: up, to: [0, 0, 1]) * quats[k])
+        }
+    }
+
+    /// Body <- body rotations across the rolling-shutter readout: entry i is the pose of the row
+    /// read at dt_i = (i/(count-1) - 0.5) * readout, relative to mid-frame: R(t+dt)^T R(t).
+    public func rowRotations(at t: Double, readout: Double, count: Int = 17) -> [simd_double3x3] {
+        let mid = simd_double3x3(orientation(at: t))
+        return (0..<count).map { i in
+            let dt = (Double(i) / Double(count - 1) - 0.5) * readout
+            return simd_double3x3(orientation(at: t + dt)).transpose * mid
         }
     }
 
@@ -185,6 +239,9 @@ public final class Motion: @unchecked Sendable {
         let body = simd_double3x3(orientation(at: t))
         return body.transpose * viewBase(at: t, mode: mode, smoothing: smoothing, lockTime: lockTime) * user
     }
+
+    /// Angular speed (deg/s) of IMU sample `i`.
+    public func angularSpeed(_ i: Int) -> Double { simd_length(omega[i]) * 180 / .pi }
 
     /// Median and 95th-percentile angular speed (deg/s): a cheap "how shaky is this" signal.
     public func shakiness() -> (median: Double, p95: Double) {
