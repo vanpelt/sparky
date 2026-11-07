@@ -75,7 +75,9 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   gyro and proxy frames: faces and people (Vision, on six world-locked views), movement in the
   scene, laughter, cheering and speech (Apple's sound classifier), jumps and impacts, and junk
   (dark, covered lens), plus scenery that stands out and arriving somewhere new. It runs at
-  3–7% of real time and is cached. The inspector's Suggestions section picks what to favour (Blend,
+  3–7% of real time and is cached (`~/Library/Application Support/Reframe/analysis/`, keyed by
+  file name, size and modification time; entries for older versions of a loaded clip's file are
+  pruned at launch). The inspector's Suggestions section picks what to favour (Blend,
   People, Action or Scenery) and re-ranks every clip instantly. The heading lane shows interest as heat
   over time *and* direction. Suggested shots appear as dashed spans and tiles with their reasons;
   each comes with a camera path (keyframes that follow the people or action, plus pitch and

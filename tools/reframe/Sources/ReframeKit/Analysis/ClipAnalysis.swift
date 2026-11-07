@@ -171,6 +171,28 @@ public enum Analyzer {
     }
 
     /// `~/Library/Application Support/Reframe/analysis/<name>-<size>-<mtime>.json`
+    /// Delete cached analyses left behind by earlier versions of these clips' files (a stub replaced
+    /// by its original, a re-fetch, a re-copied file): for each clip's name, every entry except the
+    /// ones matching a given clip's current file. Other clips' entries are untouched (still valid if
+    /// that folder is opened again). Returns how many files and bytes were removed.
+    @discardableResult
+    public static func pruneCache(keeping clips: [Clip]) -> (files: Int, bytes: Int64) {
+        guard let dir = clips.first.map({ cacheURL(for: $0).deletingLastPathComponent() }) else { return (0, 0) }
+        let names = Set(clips.map(\.name))
+        let keep = Set(clips.map { cacheURL(for: $0).lastPathComponent })
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        var removed = 0, bytes: Int64 = 0
+        for f in files where f.pathExtension == "json" && !keep.contains(f.lastPathComponent) {
+            // <clip name>-<size>-<mtime>.json; the clip name itself may contain dashes.
+            let parts = f.deletingPathExtension().lastPathComponent.split(separator: "-", omittingEmptySubsequences: false)
+            guard parts.count >= 3, parts.suffix(2).allSatisfy({ Int64($0) != nil }),
+                  names.contains(parts.dropLast(2).joined(separator: "-")) else { continue }
+            let size = Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            if (try? FileManager.default.removeItem(at: f)) != nil { removed += 1; bytes += size }
+        }
+        return (removed, bytes)
+    }
+
     public static func cacheURL(for clip: Clip) -> URL {
         let attrs = try? FileManager.default.attributesOfItem(atPath: clip.url.path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0

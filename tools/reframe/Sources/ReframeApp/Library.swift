@@ -257,6 +257,7 @@ final class Library {
                 if Task.isCancelled { return }
                 await self?.prepare(item)
             }
+            await self?.pruneAnalysisCache()
             await MainActor.run {
                 guard let self else { return }
                 self.loading = false
@@ -267,6 +268,15 @@ final class Library {
                 if Task.isCancelled { return }
                 await self?.analyze(item)
             }
+        }
+    }
+
+    /// Drop cached analyses of older versions of the loaded clips' files.
+    private func pruneAnalysisCache() async {
+        let clips = await MainActor.run { items.map(\.clip) }
+        let r = Analyzer.pruneCache(keeping: clips)
+        if r.files > 0, ProcessInfo.processInfo.environment["REFRAME_DEBUG"] != nil {
+            FileHandle.standardError.write("pruned \(r.files) stale analyses (\(r.bytes / 1024) KB)\n".data(using: .utf8)!)
         }
     }
 
@@ -302,6 +312,7 @@ final class Library {
                 }
             }
             await MainActor.run { self?.loadingCloud = false }
+            await self?.pruneAnalysisCache()
             for item in added {
                 await self?.prepare(item)
                 await MainActor.run {
