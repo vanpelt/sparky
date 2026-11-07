@@ -48,8 +48,8 @@ final class PlaybackEngine: @unchecked Sendable {
             guard isCurrent(g) else { return }
             lock.withLock { master = m; proxy = p; player = audio }
             let duration = m?.duration ?? clip.duration
+            seek(to: 0, preview: false)  // before completion, so a seek made there wins
             DispatchQueue.main.async { completion(duration) }
-            seek(to: 0, preview: false)
         }
     }
 
@@ -249,7 +249,7 @@ final class ViewerModel {
 
     // MARK: Clip and transport
 
-    func load(_ clip: Clip?) {
+    func load(_ clip: Clip?, then: (() -> Void)? = nil) {
         engine.stop()
         isPlaying = false
         self.clip = clip
@@ -259,7 +259,7 @@ final class ViewerModel {
         selectedSuggestionID = nil
         previewShot = nil
         guard let clip else { return }
-        engine.load(clip: clip) { [weak self] d in self?.duration = d }
+        engine.load(clip: clip) { [weak self] d in self?.duration = d; then?() }
     }
 
     func togglePlay() {
@@ -446,9 +446,8 @@ final class ViewerModel {
     }
 
     func renameActiveShot(_ name: String) {
-        guard var s = activeShot else { return }
-        s.name = name
-        library?.update(s)
+        guard let id = activeShotID else { return }
+        library?.rename(id, to: name)
     }
 
     func deleteActiveShot() {

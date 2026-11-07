@@ -31,6 +31,11 @@ struct ReframeApp: App {
                 }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             }
+            CommandGroup(before: .sidebar) {
+                Button("Clips") { library.browse = .clips }.keyboardShortcut("1")
+                Button("Shots") { library.browse = .shots }.keyboardShortcut("2")
+                Divider()
+            }
             CommandGroup(after: .newItem) {
                 Button("Open Footage Folder…") { library.chooseFolder() }
                     .keyboardShortcut("o")

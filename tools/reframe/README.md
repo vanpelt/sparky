@@ -49,6 +49,14 @@ shader compiles at runtime, so Xcode's optional Metal Toolchain download isn't n
   the current view as a keyframe. Between keyframes the camera eases along a smooth path. ⌘Z / ⇧⌘Z
   undo and redo shot edits. Shots are saved per footage folder in
   `~/Library/Application Support/Reframe/projects/` (the footage folder is never written).
+- **Shots view (⌘2; ⌘1 back to clips):** every shot you've made, local and cloud, as a contact
+  sheet grouped by recording day (or newest / longest first, filterable by name or clip). Hover a
+  card to scrub through the shot; the ticks along its bottom are keyframes. Each card shows the
+  length, lens, stabilization, clip and time range, a cloud badge, and a sparkle if it was kept
+  from a suggestion. Click to select (⌘-click, Shift-click, ⌘A for more), double-click or Return
+  to open it in the editor at its in point, Delete to delete (undoable). Rename a shot by clicking
+  the name of a selected card or choosing Rename, or in the inspector's Name field. With shots
+  selected, Export exports just those.
 - **Export (⌘E):** ProRes 422 HQ / 422 / LT, 10-bit 4:2:2, at HD, 4K UHD, vertical or square,
   with 24-bit source audio and a time-of-day timecode track. Each frame is rendered straight into
   the encoder's 10-bit 4:2:2 Y'CbCr buffer, with no intermediate RGB file. Files are named
@@ -105,7 +113,10 @@ binary inside the bundle directly can leave the app without a window.
 `REFRAME_SUGGESTION=1` (preview the best suggestion; `=last` the latest; `=accept` keeps the best),
 `REFRAME_PRESET=people|action|scenery` (this launch only), `REFRAME_SELFTEST=1`
 (keyframe editing, trims and undo, PASS/FAIL on stderr, undone afterwards),
-`REFRAME_EXPORT_SHEET=1`, `REFRAME_EXPORT_AUTOSTART=1`, `REFRAME_DEBUG=1` (playback fps and window
+`REFRAME_EXPORT_SHEET=1`, `REFRAME_EXPORT_AUTOSTART=1`, `REFRAME_BROWSE=shots` (with
+`REFRAME_SHOTS_SELECT=<n>` to select the first n), `REFRAME_OPEN_SHOT=<i>` (Open in Editor on the
+i-th shot, reports where the viewer lands), `REFRAME_RENAME_TEST=1` (renames the first shot and
+back), `REFRAME_DEBUG=1` (playback fps and window
 state to stderr), `REFRAME_SNAPSHOT=/path.png` (window chrome, plus `-viewer.png` with the Metal
 view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.
 

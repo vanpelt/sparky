@@ -8,13 +8,18 @@ struct ContentView: View {
     @State private var showInspector = true
     @State private var showExport = false
     @State private var keyMonitor: Any?
+    @State private var shotSelection: Set<Shot.ID> = []
+    @State private var columns: NavigationSplitViewVisibility = .all
+    @State private var exportOnly: Set<Shot.ID>?
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             Sidebar()
                 .navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 360)
         } detail: {
-            if viewer.clip != nil {
+            if library.browse == .shots {
+                ShotsBrowser(selection: $shotSelection)
+            } else if viewer.clip != nil {
                 VStack(spacing: 0) {
                     ViewerPane(viewer: viewer)
                     Divider()
@@ -26,16 +31,24 @@ struct ContentView: View {
                 emptyState
             }
         }
-        .inspector(isPresented: $showInspector) {
+        .inspector(isPresented: Binding(get: { showInspector && library.browse == .clips },
+                                        // Hiding it for the shots view mustn't count as closing it.
+                                        set: { if library.browse == .clips { showInspector = $0 } })) {
             Inspector(item: library.selectedItem, viewer: viewer)
                 .inspectorColumnWidth(min: 250, ideal: 280, max: 360)
         }
         .toolbar { toolbar }
-        .navigationTitle(library.selectedItem.flatMap { $0.clip.captureDate }
+        .navigationTitle(library.browse == .shots ? "Shots" : library.selectedItem.flatMap { $0.clip.captureDate }
             .map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Reframe")
         .navigationSubtitle(library.folder?.lastPathComponent ?? "")
         .tint(Theme.sightline)
-        .sheet(isPresented: $showExport) { ExportSheet() }
+        .sheet(isPresented: $showExport) { ExportSheet(only: exportOnly) }
+        .onChange(of: library.browse) { _, b in
+            // The shots view takes the whole window; the clip list comes back with the editor.
+            withAnimation { columns = b == .shots ? .detailOnly : .all }
+            if b == .shots { viewer.engine.stop(); viewer.isPlaying = false }
+        }
+        .onChange(of: library.shotToOpen) { _, _ in openPendingShot() }
         .onChange(of: library.preset) { _, _ in
             // Suggestions were re-ranked: a previewed one may no longer exist.
             if viewer.activeShotID == nil { viewer.deselectShot() }
@@ -44,7 +57,7 @@ struct ContentView: View {
         // Keyed on the item, not the selection: a cloud clip's item appears once it's fetched.
         .onChange(of: library.selectedItem?.id, initial: true) { _, _ in
             viewer.library = library
-            viewer.load(library.selectedItem?.clip)
+            viewer.load(library.selectedItem?.clip) { openPendingShot() }
             if let item = library.selectedItem { library.refreshSuggestionThumbnails(for: item) }
         }
         .onAppear { installKeys() }
@@ -67,8 +80,16 @@ struct ContentView: View {
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Picker("Browse", selection: Binding(get: { library.browse }, set: { library.browse = $0 })) {
+                Text("Clips").tag(Library.Browse.clips)
+                Text(library.shots.isEmpty ? "Shots" : "Shots \(library.shots.count)").tag(Library.Browse.shots)
+            }
+            .pickerStyle(.segmented)
+            .help("Clips: watch and mark. Shots: every shot you've made (⌘1 / ⌘2)")
+        }
         ToolbarItemGroup(placement: .principal) {
-            if viewer.clip != nil {
+            if viewer.clip != nil && library.browse == .clips {
                 Picker("View", selection: $viewer.projection) {
                     Text("Frame").tag(Projection.flat)
                     Text("360°").tag(Projection.equirect)
@@ -86,24 +107,56 @@ struct ContentView: View {
             }
         }
         ToolbarItemGroup(placement: .primaryAction) {
-            Button { showExport = true } label: {
-                Label(library.shots.isEmpty ? "Export" : "Export \(library.shots.count)", systemImage: "square.and.arrow.up")
+            let selected = library.browse == .shots && !shotSelection.isEmpty ? shotSelection : nil
+            Button {
+                exportOnly = selected
+                showExport = true
+            } label: {
+                Label(selected.map { "Export \($0.count) Selected" }
+                      ?? (library.shots.isEmpty ? "Export" : "Export \(library.shots.count)"), systemImage: "square.and.arrow.up")
                     .labelStyle(.titleAndIcon)
             }
             .disabled(library.shots.isEmpty)
             .help("Render shots to ProRes with timelines for Resolve and Final Cut (⌘E)")
             .keyboardShortcut("e")
             Button { showInspector.toggle() } label: { Label("Inspector", systemImage: "sidebar.right") }
+                .disabled(library.browse == .shots)
         }
+    }
+
+    /// Select the shot "Open in Editor" asked for, once its clip is the one in the viewer.
+    private func openPendingShot() {
+        guard let id = library.shotToOpen, let shot = library.shots.first(where: { $0.id == id }) else { return }
+        guard viewer.clip?.url.path == shot.clipPath, viewer.duration > 0 else { return }
+        library.shotToOpen = nil
+        viewer.select(shot)
+    }
+
+    /// Keys in the shots view: Return opens, Delete deletes, Esc clears, ⌘A selects all.
+    private func shotsKey(_ event: NSEvent) -> Bool {
+        switch event.keyCode {
+        case 36, 76:  // return, enter
+            guard let shot = library.shots.first(where: { shotSelection.contains($0.id) }) else { return false }
+            library.openInEditor(shot)
+        case 51, 117:  // delete, forward delete
+            guard !shotSelection.isEmpty else { return false }
+            library.delete(shotSelection)
+            shotSelection = []
+        case 53: shotSelection = []
+        default:
+            guard event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "a" else { return false }
+            shotSelection = Set(library.shots.map(\.id))
+        }
+        return true
     }
 
     /// Single-key shortcuts, ignored while typing in a text field.
     private func installKeys() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if NSApp.keyWindow?.firstResponder is NSText || event.modifierFlags.contains(.command) || showExport {
-                return event
-            }
+            if NSApp.keyWindow?.firstResponder is NSText || showExport { return event }
+            if library.browse == .shots { return shotsKey(event) ? nil : event }
+            if event.modifierFlags.contains(.command) { return event }
             switch (event.keyCode, event.charactersIgnoringModifiers?.lowercased()) {
             case (49, _): viewer.togglePlay()
             case (123, _): viewer.step(frames: event.modifierFlags.contains(.shift) ? -10 : -1)
@@ -191,6 +244,36 @@ struct ContentView: View {
         if let t = env["REFRAME_SEEK"].flatMap(Double.init) { viewer.scrub(to: t, final: true) }
         if env["REFRAME_AUTOPLAY"] != nil { viewer.togglePlay() }
         if env["REFRAME_EXPORT_SHEET"] != nil { showExport = true }
+        if env["REFRAME_BROWSE"] == "shots" {
+            library.browse = .shots
+            if let n = env["REFRAME_SHOTS_SELECT"].flatMap(Int.init) { shotSelection = Set(library.shots.prefix(n).map(\.id)) }
+            if env["REFRAME_DEBUG"] != nil, let shot = library.shots.first(where: { library.item(for: $0.clipPath) != nil }) {
+                library.loadShotFrames(shot)
+                for _ in 0..<100 where library.shotFrames[shot.id] == nil { try? await Task.sleep(for: .milliseconds(100)) }
+                FileHandle.standardError.write("shots hook: \(library.shots.count) shots, hover frames for \(shot.name) of \(URL(fileURLWithPath: shot.clipPath).lastPathComponent): \(library.shotFrames[shot.id]?.count ?? 0)\n".data(using: .utf8)!)
+            }
+        }
+        // REFRAME_RENAME_TEST=1: rename the first shot and back, reporting each step.
+        if env["REFRAME_RENAME_TEST"] != nil, let shot = library.shots.first {
+            let original = shot.name
+            library.rename(shot.id, to: "  Rename test  ")
+            let renamed = library.shots.first { $0.id == shot.id }?.name ?? "?"
+            library.rename(shot.id, to: "   ")  // ignored
+            let afterBlank = library.shots.first { $0.id == shot.id }?.name ?? "?"
+            library.rename(shot.id, to: original)
+            let back = library.shots.first { $0.id == shot.id }?.name ?? "?"
+            FileHandle.standardError.write("rename test: '\(original)' -> '\(renamed)' -> blank keeps '\(afterBlank)' -> back '\(back)'\n".data(using: .utf8)!)
+        }
+        // REFRAME_OPEN_SHOT=<n>: "Open in Editor" on the n-th shot (0-based), then report where the viewer is.
+        if let n = env["REFRAME_OPEN_SHOT"].flatMap(Int.init), n < library.shots.count {
+            let shot = library.shots[n]
+            library.openInEditor(shot)
+            for _ in 0..<80 where viewer.activeShotID != shot.id { try? await Task.sleep(for: .milliseconds(100)) }
+            try? await Task.sleep(for: .seconds(1))
+            FileHandle.standardError.write(String(format: "open shot: %@ %@ browse=%@ active=%@ t=%.2f in=%.2f\n", shot.name,
+                URL(fileURLWithPath: shot.clipPath).lastPathComponent, library.browse.rawValue,
+                viewer.activeShotID == shot.id ? "yes" : "no", viewer.currentTime, shot.inTime).data(using: .utf8)!)
+        }
         if let snap = env["REFRAME_SNAPSHOT"] {
             try? await Task.sleep(for: .seconds(6))
             viewer.debugCapturePath = snap.replacingOccurrences(of: ".png", with: "-viewer.png")

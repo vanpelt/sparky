@@ -37,6 +37,15 @@ final class Library {
     var folder: URL?
     var items: [ClipItem] = []
     var selection: URL? { didSet { if selection != oldValue { fetchSelectedCloudClip() } } }
+    /// Which browser fills the window: clips (the editor) or every shot as a contact sheet.
+    enum Browse: String { case clips, shots }
+    var browse: Browse = .clips
+    /// A shot to select once its clip is in the viewer ("Open in Editor" from the shots view).
+    var shotToOpen: Shot.ID?
+    /// Frames across each shot for hover-scrubbing in the shots view (rendered on first hover).
+    var shotFrames: [Shot.ID: [CGImage]] = [:]
+    @ObservationIgnored private var shotFrameSource: [Shot.ID: Shot] = [:]
+    @ObservationIgnored private var shotFrameTasks: Set<Shot.ID> = []
     /// Insta360 Cloud: its recordings join the library once fetched (trailer + LRV).
     let cloud: CloudLibrary = MainActor.assumeIsolated { CloudLibrary() }
     var loading = false
@@ -529,10 +538,65 @@ final class Library {
             || old.stabilization != shot.stabilization { refreshThumbnail(for: shot) }
     }
 
-    func delete(_ id: Shot.ID) {
+    func delete(_ id: Shot.ID) { delete([id]) }
+
+    /// Delete several shots as one undo step.
+    func delete(_ ids: Set<Shot.ID>) {
+        guard shots.contains(where: { ids.contains($0.id) }) else { return }
         recordUndo()
-        shots.removeAll { $0.id == id }
-        shotThumbnails[id] = nil
+        shots.removeAll { ids.contains($0.id) }
+        for id in ids { shotThumbnails[id] = nil; shotFrames[id] = nil }
+    }
+
+    /// Rename a shot (empty or unchanged names are ignored). Undoable.
+    func rename(_ id: Shot.ID, to name: String) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty, var s = shots.first(where: { $0.id == id }), s.name != n else { return }
+        s.name = n
+        update(s)
+    }
+
+    // MARK: Shots view
+
+    /// Switch to the editor on the shot's clip, with the shot selected at its in point.
+    func openInEditor(_ shot: Shot) {
+        guard let item = item(for: shot.clipPath) else { return }
+        shotToOpen = shot.id
+        browse = .clips
+        selection = item.id
+    }
+
+    /// When the shot was recorded: its clip's capture time, else the camera file name's stamp.
+    func recordingDate(of shot: Shot) -> Date? {
+        if let d = item(for: shot.clipPath)?.clip.captureDate { return d }
+        let parts = URL(fileURLWithPath: shot.clipPath).lastPathComponent.split(separator: "_")
+        guard parts.count >= 3 else { return nil }
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMddHHmmss"
+        f.timeZone = .current
+        return f.date(from: String(parts[1] + parts[2]))
+    }
+
+    /// Render `count` frames spread across the shot (once per edit of the shot).
+    @MainActor func loadShotFrames(_ shot: Shot, count: Int = 10) {
+        // A rename doesn't change the pictures.
+        if var had = shotFrameSource[shot.id], shotFrames[shot.id] != nil {
+            had.name = shot.name
+            if had == shot { return }
+        }
+        guard !shotFrameTasks.contains(shot.id), let item = item(for: shot.clipPath) else { return }
+        shotFrameTasks.insert(shot.id)
+        Task.detached(priority: .userInitiated) { [weak self, renderer] in
+            let times = (0..<count).map { shot.inTime + (Double($0) + 0.5) / Double(count) * shot.duration }
+            let frames = await Library.renderShotFrames(shot, item: item, at: times, renderer: renderer)
+            await MainActor.run {
+                guard let self else { return }
+                self.shotFrameTasks.remove(shot.id)
+                guard !frames.isEmpty else { return }
+                self.shotFrames[shot.id] = frames
+                self.shotFrameSource[shot.id] = shot
+            }
+        }
     }
 
     func nextShotName(for clip: Clip) -> String {
@@ -556,9 +620,22 @@ final class Library {
 
     /// One proxy frame seen through a shot's framing.
     static func renderShotFrame(_ shot: Shot, item: ClipItem, at t: Double, renderer: ReframeRenderer) async -> CGImage? {
+        await renderShotFrames(shot, item: item, at: [t], renderer: renderer).first
+    }
+
+    /// Proxy frames seen through a shot's framing, from one reader.
+    static func renderShotFrames(_ shot: Shot, item: ClipItem, at times: [Double], renderer: ReframeRenderer) async -> [CGImage] {
         let clip = item.clip
-        guard let reader = try? await FrameReader(url: clip.proxyURL ?? clip.url),
-              let frames = try? reader.frame(at: t), let motion = clip.motion else { return nil }
+        guard let reader = try? await FrameReader(url: clip.proxyURL ?? clip.url), let motion = clip.motion else { return [] }
+        return times.compactMap { t in
+            guard let frames = try? reader.frame(at: t) else { return nil }
+            return shotImage(shot, item: item, frames: frames, motion: motion, renderer: renderer)
+        }
+    }
+
+    private static func shotImage(_ shot: Shot, item: ClipItem, frames: LensFrames, motion: Motion,
+                                  renderer: ReframeRenderer) -> CGImage? {
+        let clip = item.clip
         let f = shot.framing(at: frames.time)
         var view = ViewSettings()
         view.hfov = f.hfov

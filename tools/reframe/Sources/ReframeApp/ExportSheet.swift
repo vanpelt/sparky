@@ -5,6 +5,8 @@ import SwiftUI
 struct ExportSheet: View {
     @Environment(Library.self) private var library
     @Environment(\.dismiss) private var dismiss
+    /// Export only these shots (the shots view's selection); nil exports all.
+    var only: Set<Shot.ID>? = nil
     @AppStorage("export.size") private var size: ExportOptions.Size = .hd
     @AppStorage("export.codec") private var codec: ExportOptions.Codec = .proRes422HQ
     @AppStorage("export.bakeLook") private var bakeLook = false
@@ -28,7 +30,8 @@ struct ExportSheet: View {
     }
 
     private var exportable: [(Shot, Clip)] {
-        library.shots.compactMap { s in library.item(for: s.clipPath).map { (s, $0.clip) } }
+        library.shots.filter { only?.contains($0.id) ?? true }
+            .compactMap { s in library.item(for: s.clipPath).map { (s, $0.clip) } }
             .sorted { ($0.1.captureDate ?? .distantPast, $0.0.inTime) < ($1.1.captureDate ?? .distantPast, $1.0.inTime) }
     }
 

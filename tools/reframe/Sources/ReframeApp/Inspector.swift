@@ -38,13 +38,24 @@ private struct ShotSection: View {
     let shot: Shot
     @Bindable var viewer: ViewerModel
     @State private var name = ""
+    @FocusState private var nameFocused: Bool
+
+    private func commitName() {
+        viewer.renameActiveShot(name)
+        name = viewer.activeShot?.name ?? shot.name
+    }
 
     var body: some View {
         Section("Shot") {
-            TextField("Name", text: $name)
+            TextField("Name", text: $name, prompt: Text("Shot name"))
+                .focused($nameFocused)
                 .onAppear { name = shot.name }
                 .onChange(of: shot.id) { _, _ in name = shot.name }
-                .onSubmit { viewer.renameActiveShot(name) }
+                .onChange(of: shot.name) { _, n in if !nameFocused { name = n } }
+                // Saves on Return and when you click away; an empty name puts the old one back.
+                .onSubmit { commitName() }
+                .onChange(of: nameFocused) { _, focused in if !focused { commitName() } }
+                .help("Rename this shot (also in the Shots view)")
             LabeledContent("In") {
                 Button(formatTimecode(shot.inTime, fps: viewer.fps)) { viewer.scrub(to: shot.inTime, final: true) }
                     .buttonStyle(.plain).font(Theme.numeric(12)).help("Go to this point")
