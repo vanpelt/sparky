@@ -67,6 +67,7 @@ func runCloud(_ args: [String]) async {
             let t0 = Date()
             let url = try await CloudCache.fetch(m, client: c) { stage in
                 if case .trailer = stage { print("reading trailer…") }
+                if case .fromStudio = stage { print("using Insta360 Studio's download…") }
             }
             say("ready in \(ms(Date().timeIntervalSince(t0))): \(url.path) (stub \(CloudCache.isStub(url)), \(gb(CloudCache.diskUsage(m.id))) on disk)")
             if rest.contains("--original") {
@@ -109,6 +110,17 @@ func runCloud(_ args: [String]) async {
                 CFPreferencesAppSynchronize(app)
                 say("forgot the saved footage folder (\(savedFolder)); open one again with ⌘O")
             }
+
+        case "studio":  // what Insta360 Studio has downloaded (Reframe clones these instead of fetching)
+            guard StudioProject.isStudioInstalled else { say("Insta360 Studio isn't installed"); break }
+            let all = StudioDownloads.all()
+            for (id, rows) in all.sorted(by: { $0.key < $1.key }) {
+                for r in rows {
+                    let size = (try? FileManager.default.attributesOfItem(atPath: r.path)[.size] as? Int64) ?? -1
+                    say("\(id)  \(r.name)  \(gb(r.size))  \(size == r.size ? "on disk" : size < 0 ? "missing" : "size differs")")
+                }
+            }
+            say("\(all.count) recording\(all.count == 1 ? "" : "s") downloaded by Studio")
 
         case "get":  // debug: reframe-cli cloud get <host> <path> [key=value ...] (output redacted)
             guard rest.count >= 2 else { fail("usage: reframe-cli cloud get <host> <path> [k=v ...]") }

@@ -129,7 +129,11 @@ view and `-sheet.png` for an open sheet). See `DESIGN.md` for the design plan.
 Recordings in Insta360 Cloud sit in the sidebar beside the open folder's, on the same days, with a
 cloud badge. When the open folder has the same recording, the cloud entry wins (shots always
 reference the cloud); the local copy is used instead of the network to fetch it and as its
-original for export. Connect with the cloud button at the bottom of the
+original for export. Likewise, when Insta360 Studio is installed and has already downloaded a
+recording (it records them in its `download.db`), Reframe clones Studio's copy instead of
+fetching (`reframe-cli cloud studio` lists them). Studio saves to `~/Downloads/Insta360 Download`
+by default, which makes macOS ask Reframe for Downloads access; pointing Studio's "Cloud file
+download path" at e.g. `~/Movies/Insta360 Download` avoids that. Connect with the cloud button at the bottom of the
 sidebar: Insta360's own sign-in page opens and you sign in there; Reframe keeps only the session
 token (30 days, renewed automatically).
 

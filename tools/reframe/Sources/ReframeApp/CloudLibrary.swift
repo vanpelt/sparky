@@ -142,11 +142,12 @@ extension CloudCache.Stage {
         case .trailer: return "Reading gyro and calibration…"
         case .proxy(let p): return "Fetching low-res proxy… \(Int(p * 100))%"
         case .original(let p): return "Downloading original… \(Int(p * 100))%"
+        case .fromStudio: return "Using Insta360 Studio's download…"
         }
     }
     var fraction: Double? {
         switch self {
-        case .trailer: return nil
+        case .trailer, .fromStudio: return nil
         case .proxy(let p), .original(let p): return p
         }
     }

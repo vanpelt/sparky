@@ -102,6 +102,14 @@ Debug commands: `cloud status`, `cloud list [--raw]`, `cloud probe <name|id>`,
   the local copies (trailer cut, LRV cloned). Reframe no longer opens a folder by default, and the
   cloud's entry wins over a local duplicate (a local copy feeds fetches and originals instead).
 
+- **Studio's downloads** (`StudioDownloads`): only when Studio is installed, Reframe reads
+  `Insta360 Studio/user_data/<account>/download.db` read-only (`downloaded_list` + `download_file_list`,
+  TASK_ID `<mediaId>##0##<path>##1`) and clones Studio's original and LRV instead of fetching: a
+  fetch took 62 ms and an original 3 ms for clip 051 (APFS clones). Studio's other caches aren't
+  shared: it keeps no LRVs for cloud clips (it streams a stitched DASH preview, 1 MB chunks in
+  `previewer_cache`), and its gyro/stabilization data (`FootageProject/*/p3.bin`,
+  `Cache/gyro`) is in undocumented formats under ~/Documents, which macOS guards.
+
 Not done: expired signed URLs mid-download aren't retried; nothing evicts old LRVs; the cloud
 album `create_time` uses this Mac's time zone (Studio's used the camera's).
 

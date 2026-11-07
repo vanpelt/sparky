@@ -65,11 +65,16 @@ public enum CloudCache {
         return files.reduce(0) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     }
 
-    public enum Stage: Sendable { case trailer, proxy(Double), original(Double) }
+    public enum Stage: Sendable { case trailer, proxy(Double), original(Double), fromStudio }
 
     /// Make a cloud recording workable: its trailer stub and its LRV. Returns the .insv URL.
     public static func fetch(_ media: CloudMedia, client: CloudClient,
                              progress: @escaping @Sendable (Stage) -> Void) async throws -> URL {
+        // Insta360 Studio may have downloaded it already: clone that rather than fetch.
+        if let studio = StudioDownloads.files(mediaId: media.id), let original = studio.original {
+            progress(.fromStudio)
+            if let url = try? seed(media, fromLocal: original) { return url }
+        }
         let files = try await client.files(for: media.id)
         guard let master = files.first(where: { $0.name.lowercased().hasSuffix(".insv") }) else {
             throw CloudError.badResponse("no .insv among \(files.map(\.name))")
@@ -156,6 +161,11 @@ public enum CloudCache {
     public static func downloadOriginal(_ clipURL: URL, client: CloudClient,
                                         progress: @escaping @Sendable (Double) -> Void) async throws {
         guard let r = record(for: clipURL), isStub(clipURL) else { return }
+        if let original = StudioDownloads.files(mediaId: r.mediaId)?.original,
+           (try? adoptOriginal(clipURL, from: original)) != nil {
+            progress(1)
+            return
+        }
         let files = try await client.files(for: r.mediaId)
         guard let master = files.first(where: { $0.name == r.name }) else { throw CloudError.badResponse("original not listed") }
         try await download(master.url, to: clipURL, progress: progress)
