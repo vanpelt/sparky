@@ -44,6 +44,13 @@ struct ReframeApp: App {
                 Button("Choose LUT Folder…") { library.chooseLUTFolder() }
             }
         }
+
+        // Reframe › Settings… (⌘,): storage.
+        Settings {
+            StorageSettings()
+                .environment(library)
+                .preferredColorScheme(.dark)
+        }
     }
 }
 
@@ -52,6 +59,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Needed when launched as a bare executable (swift run / Xcode) rather than a bundle.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        // Dark everywhere (a neutral surround for judging footage): preferredColorScheme reaches
+        // the main window but not Settings, sheets' hosts or alerts.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
         // Launched outside LaunchServices (e.g. a bare executable), SwiftUI may not open the
         // initial window. Ask for one if nothing appeared.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -67,9 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        // Debug: REFRAME_SETTINGS=1 opens Settings, and the snapshot then captures that window.
+        let settings = ProcessInfo.processInfo.environment["REFRAME_SETTINGS"] != nil
         if let path = ProcessInfo.processInfo.environment["REFRAME_SNAPSHOT"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 9) {
-                let windows = NSApp.windows.filter { $0.isVisible && $0.contentView != nil && $0.frame.width > 400 }
+                var windows = NSApp.windows.filter { $0.isVisible && $0.contentView != nil && $0.frame.width > 400 }
+                if settings { windows = windows.filter { $0.frame.width < 900 } }
                 guard let view = windows.max(by: { $0.frame.width < $1.frame.width })?.contentView,
                       let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                     FileHandle.standardError.write("snapshot: no window (\(NSApp.windows.count) total)\n".data(using: .utf8)!)

@@ -5,6 +5,8 @@ import Foundation
 public enum Signal: String, CaseIterable, Codable, Sendable {
     // Directional (time × heading)
     case faces, people, motion, salience
+    /// Matches a typed search (MobileCLIP, Semantic/SemanticIndex.swift); only set while searching.
+    case query
     // Audio
     case loudness, onset, laughter, cheering, shouting, speech, music, wind
     // Camera motion (IMU)
@@ -21,6 +23,7 @@ public enum Signal: String, CaseIterable, Codable, Sendable {
         case .people: return "people"
         case .motion: return "movement"
         case .salience: return "stands out"
+        case .query: return "matches search"
         case .novelty: return "new scenery"
         case .loudness: return "loud"
         case .onset: return "sudden sounds"
@@ -41,7 +44,7 @@ public enum Signal: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    public var isDirectional: Bool { self == .faces || self == .people || self == .motion || self == .salience }
+    public var isDirectional: Bool { self == .faces || self == .people || self == .motion || self == .salience || self == .query }
 
     public var isAudio: Bool {
         switch self {

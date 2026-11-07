@@ -10,6 +10,8 @@ import simd
 //   reframe-cli analyze <file.insv | folder>... [--json] [--no-cache] [--preset blend|people|action|scenery]
 //                       [--heat] [--stills dir [--lut file.cube]]
 //   reframe-cli evaluate <footage folder> [--preset P] [--json]   (scores suggestions against your shots)
+//   reframe-cli index <file.insv | folder | cloud>... [--no-cache]     (MobileCLIP embeddings, SEMANTIC.md)
+//   reframe-cli search "<query>" <file.insv | folder | cloud>... [--limit N] [--stills dir] [--shots] [--raw]
 //   reframe-cli cloud login|logout|status|list [--raw]|probe <name|mediaId>|fetch <name> [--original]
 //                     |migrate [--dry-run]   (Insta360 Cloud, CLOUD.md)
 
@@ -302,6 +304,117 @@ case "evaluate":
         }
         for id in c.dismissedStillTop3 { print("  \(c.clip) dismissed \(id) is still in the top 3") }
     }
+
+case "index", "search":
+    // reframe-cli index <file.insv | folder | cloud>... [--no-cache]
+    // reframe-cli search "<query>" <file.insv | folder | cloud>... [--limit N] [--stills dir] [--lut file.cube]
+    //                    [--shots] [--floor 0.17] [--raw]
+    // Text search over MobileCLIP embeddings of world-locked horizon views (SEMANTIC.md).
+    var rest: [String] = []
+    var skip = false
+    for a in args {
+        if skip { skip = false; continue }
+        if ["--limit", "--stills", "--lut", "--floor"].contains(a) { skip = true; continue }
+        if !a.hasPrefix("--") { rest.append(a) }
+    }
+    let query = command == "search" ? rest.first : nil
+    if command == "search", query == nil { fail("search \"<query>\" <file.insv | folder | cloud>...") }
+    let targets = command == "search" ? Array(rest.dropFirst()) : rest
+    guard !targets.isEmpty else { fail("\(command) needs clips: a file, a folder or \"cloud\"") }
+    var urls: [URL] = []
+    for p in targets {
+        var isDir: ObjCBool = false
+        if p == "cloud" { urls += CloudCache.readyClips().sorted { $0.lastPathComponent < $1.lastPathComponent }; continue }
+        let u = URL(fileURLWithPath: p)
+        if FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue { urls += Clip.scan(folder: u) } else { urls.append(u) }
+    }
+    let encoder: CLIPEncoder
+    do { encoder = try CLIPEncoder.shared() } catch { fail("\(error)") }
+    var q: [Float] = []
+    if let query {
+        let t0 = Date()
+        q = try encoder.embed(text: query)
+        print(String(format: "query \"%@\" → %@ (%.0f ms)", query, encoder.tokenizer.encode(query).prefix { $0 != 0 }.map(String.init).joined(separator: " "),
+                     Date().timeIntervalSince(t0) * 1000))
+    }
+    let floor = Float(option("--floor") ?? "") ?? 0.17
+    var hits: [(SemanticHit, Clip)] = []
+    for u in urls {
+        let clip = try Clip(url: u)
+        let start = Date()
+        guard let index = try await SemanticIndexer.index(clip, useCache: !flag("--no-cache")) else {
+            print("\(clip.name): no proxy or gyro, skipped"); continue
+        }
+        let secs = Date().timeIntervalSince(start)
+        if query == nil || secs > 1 {
+            print(String(format: "%@  %d samples × %d views in %.1fs (%.2f× real time)  %@", clip.name, index.times.count, index.viewCount,
+                         secs, secs / max(clip.duration, 1),
+                         index.timings.sorted { $0.key < $1.key }.map { String(format: "%@ %.1fs", $0.key, $0.value) }.joined(separator: ", ")))
+        }
+        guard query != nil else { continue }
+        let sims = index.similarities(q)
+        let r = flag("--raw") ? sims : sims.map { min(max(($0 - floor) / 0.08, 0), 1) }
+        let perTime = (0..<index.times.count).map { t in r[(t * index.viewCount)..<((t + 1) * index.viewCount)].max() ?? 0 }
+        let found = index.hits(similarity: sims, floor: flag("--raw") ? -1 : floor, limit: Int(option("--limit") ?? "") ?? 5)
+        let sorted = r.sorted()
+        print(String(format: "%@  p50 %.3f p99 %.3f max %.3f  ", clip.name, sorted[sorted.count / 2], sorted[sorted.count * 99 / 100], sorted.last ?? 0) + sparkline(perTime, width: 80, fixedMax: flag("--raw") ? nil : 1))
+        hits += found.map { ($0, clip) }
+
+        if flag("--shots") {
+            let a = try await Analyzer.analyze(clip)
+            let channel = index.headingChannel(r,
+                                               rate: a.signals.rate, count: a.signals.count)
+            for (i, s) in a.searched(channel).suggestions.prefix(3).enumerated() {
+                print(String(format: "    shot %d. %@–%@  score %.2f  %@  path ", i + 1, clock(s.inTime), clock(s.outTime), s.score, s.summary)
+                      + s.keyframes.map { String(format: "%@ %+.0f°", clock($0.time), $0.framing.yaw) }.joined(separator: " → "))
+            }
+        }
+    }
+    guard query != nil else { break }
+    hits.sort { $0.0.score > $1.0.score }
+    let top = Array(hits.prefix(Int(option("--limit") ?? "") ?? 10))
+    print("\nTop matches")
+    for (i, (h, _)) in top.enumerated() {
+        print(String(format: "  %2d. %.3f  %@  %@  heading %+.0f°", i + 1, h.score, h.clipName, clock(h.time), h.yaw))
+    }
+    if let dir = option("--stills") {
+        let out = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let renderer = try ReframeRenderer()
+        if let lut = option("--lut") { renderer.setLUT(try CubeLUT(url: URL(fileURLWithPath: lut))) }
+        for (i, (h, clip)) in top.enumerated() {
+            guard let proxy = clip.proxyURL, let m = clip.motion, let frames = try await FrameReader(url: proxy).frame(at: h.time) else { continue }
+            var view = ViewSettings()
+            view.hfov = 90; view.distortion = 0
+            view.applyLUT = option("--lut") != nil && clip.info.colorProfile == "I_Log"
+            view.bodyFromCamera = m.bodyFromCamera(at: frames.time, mode: .lock, smoothing: 0, lockTime: 0, yaw: h.yaw, pitch: 0, roll: 0)
+            if let img = renderer.renderImage(frames: frames, rig: clip.rig, view: view, width: 512, height: 512, sixteenBit: false) {
+                try writePNG(img, to: out.appendingPathComponent(String(format: "%02d-%@-%.0fs.png", i + 1, clip.name, h.time)))
+            }
+        }
+        print("wrote \(top.count) stills to \(out.path)")
+    }
+
+case "storage":
+    // reframe-cli storage [--remove-originals]: what Reframe keeps on disk (Settings › Storage).
+    if flag("--remove-originals") {
+        for url in CloudCache.readyClips() where !CloudCache.isStub(url) {
+            do {
+                try CloudCache.revertToStub(url)
+                let info = try InsvFile(url: url).info
+                print("reverted \(url.lastPathComponent) to its trailer stub (\(info.camera), stub \(CloudCache.isStub(url)))")
+            } catch { print("couldn't revert \(url.lastPathComponent): \(error)") }
+        }
+    }
+    let r = StorageReport.scan()
+    let f = ByteCountFormatter()
+    for kind in StorageReport.Kind.allCases where r.bytes(kind) > 0 {
+        let n = r.entries(kind).count
+        print(kind.label.padding(toLength: 18, withPad: " ", startingAt: 0)
+              + String(repeating: " ", count: max(0, 10 - f.string(fromByteCount: r.bytes(kind)).count))
+              + f.string(fromByteCount: r.bytes(kind)) + "  (\(n) item\(n == 1 ? "" : "s"))")
+    }
+    print("total \(f.string(fromByteCount: r.total)), of which \(f.string(fromByteCount: r.shared)) shares blocks with other copies")
 
 case "cloud":
     // Sign-in runs AppKit, which must stay on the main thread (top-level code is; async code isn't).

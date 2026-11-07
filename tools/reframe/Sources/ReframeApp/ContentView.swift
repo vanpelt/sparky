@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(Library.self) private var library
+    @Environment(\.openSettings) private var openSettings
     @State private var viewer = ViewerModel()
     @State private var showInspector = true
     @State private var showExport = false
@@ -259,6 +260,7 @@ struct ContentView: View {
         if let t = env["REFRAME_SEEK"].flatMap(Double.init) { viewer.scrub(to: t, final: true) }
         if env["REFRAME_AUTOPLAY"] != nil { viewer.togglePlay() }
         if env["REFRAME_EXPORT_SHEET"] != nil { showExport = true }
+        if env["REFRAME_SETTINGS"] != nil { openSettings() }
         if env["REFRAME_BROWSE"] == "shots" {
             library.browse = .shots
             if let n = env["REFRAME_SHOTS_SELECT"].flatMap(Int.init) { shotSelection = Set(library.shots.prefix(n).map(\.id)) }
@@ -601,6 +603,7 @@ struct CloudButton: View {
                     if case .failed(let m) = cloud.state { Text(m) }
                     Button("Refresh") { Task { await cloud.refresh() } }
                     Button("Fetch All Cloud Clips") { library.fetchAllCloudClips() }
+                    SettingsLink { Text("Manage Storage…") }
                     Divider()
                     Button("Sign Out of Insta360 Cloud") { cloud.signOut() }
                 } label: {

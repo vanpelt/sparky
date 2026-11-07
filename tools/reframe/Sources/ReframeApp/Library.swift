@@ -395,6 +395,37 @@ final class Library {
         }
     }
 
+    // MARK: Storage
+
+    /// Delete the analysis cache; clips are analyzed again when next opened.
+    @MainActor @discardableResult func clearAnalysisCache() -> Int { StorageReport.clearAnalysis() }
+
+    /// Turn every downloaded original back into its trailer stub (proxies and shots stay).
+    @MainActor @discardableResult func removeDownloadedOriginals() -> Int {
+        var n = 0
+        for url in CloudCache.readyClips() where !CloudCache.isStub(url) {
+            guard (try? CloudCache.revertToStub(url)) != nil else { continue }
+            item(for: url.path)?.originalInCloud = true
+            n += 1
+        }
+        return n
+    }
+
+    /// Remove cached cloud clips (all, or only those without shots). Shots are never deleted; a
+    /// removed clip is fetched again (or cloned from Studio) when you open it.
+    @MainActor @discardableResult func removeCloudClips(keepingClipsWithShots: Bool) -> Int {
+        let withShots = Set(shots.map(\.clipPath))
+        var n = 0
+        for url in CloudCache.readyClips() where !(keepingClipsWithShots && withShots.contains(url.path)) {
+            guard let r = CloudCache.record(for: url) else { continue }
+            if selection == url { selection = nil }
+            items.removeAll { $0.id == url }
+            CloudCache.remove(r.mediaId)
+            n += 1
+        }
+        return n
+    }
+
     /// Remove a cloud clip's cached files (its shots stay; fetching it again brings them back).
     func removeCloudCache(_ item: ClipItem) {
         guard item.isCloud, let r = CloudCache.record(for: item.clip.url) else { return }
