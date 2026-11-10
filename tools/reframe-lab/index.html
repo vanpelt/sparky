@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reframe Lab</title>
+<style>
+:root {
+  --bg: #111214; --panel: #18191c; --raised: #202226; --line: #2c2e33; --text: #e6e6e6; --dim: #8b8e95;
+  --faint: #5a5d63; --aim: #3fd0e0; --pick: #ffffff; --bad: #e0695f; --good: #7fcf8a;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--faint); }
+button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+select, input[type=number], textarea { background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+textarea { width: 100%; resize: vertical; font-family: var(--mono); font-size: 12px; }
+.app { display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: .01em; }
+.tabs { display: flex; gap: 4px; }
+.ctrl { display: flex; gap: 6px; align-items: center; color: var(--dim); }
+.ctrl select { color: var(--text); max-width: 240px; }
+.spacer { flex: 1; }
+#coverage { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+#runbar { display: flex; gap: 8px; align-items: center; flex-basis: 100%; padding-top: 8px; border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 12px; flex-wrap: wrap; }
+#runbar .track { flex: 1; min-width: 120px; max-width: 360px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+#runbar .track i { display: block; height: 100%; background: var(--text); }
+#runbar .state { font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em; color: var(--text); }
+#runbar .state.paused, #runbar .state.interrupted, #runbar .state.stopped { color: var(--dim); }
+#runbar .err { color: var(--bad); max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#runbar .nums { font-family: var(--mono); font-size: 11px; }
+.body { display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
+main { overflow: auto; padding: 12px 16px 40px; min-width: 0; }
+aside { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 14px; }
+@media (max-width: 900px) { .body { grid-template-columns: 1fr; } aside { display: none; } }
+
+/* Moments */
+.moment { margin: 0 0 14px; }
+.moment .head { display: flex; gap: 10px; align-items: baseline; color: var(--dim); margin: 0 0 4px; font-size: 12px; }
+.moment .head b { color: var(--text); font-weight: 500; }
+.moment .head .shot { color: var(--aim); }
+.strip { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.thumb { position: relative; border-radius: 4px; overflow: hidden; background: var(--raised); cursor: pointer;
+  aspect-ratio: 1; outline: 2px solid transparent; outline-offset: -2px; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb.sel { outline-color: var(--pick); outline-width: 3px; }
+.thumb .bar { position: absolute; left: 0; bottom: 0; height: 4px; background: var(--pick); opacity: .85; }
+.thumb .aim { position: absolute; left: 0; right: 0; top: 0; height: 4px; background: var(--aim); }
+.thumb .pick { position: absolute; right: 4px; top: 8px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--pick); box-shadow: 0 0 0 2px rgba(0,0,0,.6); }
+.thumb .lab { position: absolute; left: 4px; top: 8px; font: 600 10px var(--mono); padding: 1px 4px; border-radius: 3px;
+  background: rgba(0,0,0,.7); }
+.thumb .lab.r0 { color: var(--bad); } .thumb .lab.r1 { color: var(--dim); } .thumb .lab.r2, .thumb .lab.r3 { color: var(--good); }
+.thumb .yaw { position: absolute; right: 4px; bottom: 6px; font: 10px var(--mono); color: rgba(255,255,255,.7);
+  text-shadow: 0 1px 2px #000; }
+.legend { color: var(--dim); font-size: 12px; margin: 0 0 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.sw { display: inline-block; width: 14px; height: 4px; vertical-align: middle; margin-right: 5px; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--pick); vertical-align: middle; margin-right: 5px; }
+
+/* Side panel */
+aside img { width: 100%; border-radius: 6px; display: block; }
+aside h2 { font-size: 13px; margin: 12px 0 2px; font-weight: 600; }
+aside .meta { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+.rate { display: flex; gap: 4px; margin: 8px 0; flex-wrap: wrap; }
+.rate button { flex: 1; padding: 5px 0; }
+.kv { display: grid; grid-template-columns: 1fr 56px 70px; gap: 3px 8px; align-items: center; font-size: 12px; }
+.kv .k { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv .v { font-family: var(--mono); text-align: right; }
+.kv .p { height: 4px; background: var(--line); border-radius: 2px; position: relative; }
+.kv .p i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--text); border-radius: 2px; }
+.note { color: var(--dim); font-size: 12px; margin: 8px 0; }
+.caption { font-size: 12px; margin: 6px 0; }
+.chips span { display: inline-block; background: var(--raised); border-radius: 10px; padding: 1px 7px; margin: 2px 3px 0 0; font-size: 11px; color: var(--dim); }
+kbd { font: 11px var(--mono); background: var(--raised); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+
+/* Metrics */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.card h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.card p { color: var(--dim); margin: 0 0 8px; font-size: 12px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { color: var(--dim); font-weight: 500; position: sticky; top: 0; background: var(--bg); }
+th:first-child, td:first-child { text-align: left; }
+td.num { font-family: var(--mono); }
+td .b { display: inline-block; height: 6px; background: var(--text); border-radius: 2px; vertical-align: middle; margin-right: 6px; opacity: .8; }
+tr.best td { font-weight: 600; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.status { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: pre-wrap; }
+.more { margin: 16px 0; text-align: center; }
+
+/* Aim from a suggestion you kept as-is: dashed (it agrees with the app by construction) */
+.thumb .aim.sugg { background: repeating-linear-gradient(90deg, var(--aim) 0 6px, transparent 6px 11px); }
+.moment .head .shot.sugg { color: var(--dim); }
+.sw.sugg { background: repeating-linear-gradient(90deg, var(--aim) 0 4px, transparent 4px 7px); }
+
+/* Candidates */
+.card.intro { margin-bottom: 14px; max-width: 980px; }
+.thumb.candv::after { content: ""; position: absolute; inset: 0; border: 2px dashed rgba(255,255,255,.6); border-radius: 4px; pointer-events: none; }
+.why { font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 3px; background: var(--raised); }
+.why.top { color: var(--good); } .why.unsure { color: var(--aim); }
+.moment.done { opacity: .55; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Reframe Lab</h1>
+    <div class="tabs">
+      <button data-tab="moments" class="on">Moments</button>
+      <button data-tab="grid">Grid</button>
+      <button data-tab="candidates" title="Moments you didn't keep, to rate: the yes/no answers a taste probe needs">Candidates</button>
+      <button data-tab="metrics">Metrics</button>
+    </div>
+    <label class="ctrl">Score by <select id="scoreBy"></select></label>
+    <label class="ctrl">Clip <select id="clip"><option value="">All clips</option></select></label>
+    <label class="ctrl" id="sortWrap">Sort <select id="sort">
+      <option value="time">By time</option>
+      <option value="score">Best score first</option>
+      <option value="miss">Score misses your aim</option>
+      <option value="unsure">Least sure first</option>
+    </select></label>
+    <div class="tabs">
+      <button id="fShots" title="Only moments inside your kept shots">In your shots</button>
+      <button id="fUnlabeled" title="Only views you haven't rated">Unlabeled</button>
+    </div>
+    <div class="spacer"></div>
+    <span id="coverage"></span>
+    <div id="runbar"></div>
+  </header>
+  <div class="body">
+    <main id="main"></main>
+    <aside id="side"><p class="note">Select a view to see everything the pipeline says about it.</p></aside>
+  </div>
+</div>
+<script>
+const NEG = /(^dull$|\.junk$)/;           // lower is better: flipped for ranking and metrics
+const POS_RATING = 2;                      // Good and Great are positives
+let D = null, tab = "moments", sel = null, scoreBy = null, extra = {}, shown = 400, probeInfo = {};
+const $ = (q) => document.querySelector(q);
+const fmt = (x, d = 2) => x == null || Number.isNaN(x) ? "–" : (+x).toFixed(d);
+const clock = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+const short = (name) => name.replace(/^VID_\d{8}_/, "").replace(/_00_/, " #");
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("lab." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("lab." + k, JSON.stringify(v)); } catch {} },
+};
+
+async function api(path, body) {
+  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// MARK: Data
+
+async function load() {
+  D = await api("/api/data");
+  D.byId = new Map(D.views.map((v, i) => [v.id, i]));
+  D.moments = [];
+  const m = new Map();
+  D.views.forEach((v, i) => {
+    const k = v.clip + "|" + v.time;
+    if (!m.has(k)) { m.set(k, { clip: v.clip, time: v.time, shot: v.shot, src: v.shot_source, views: [] }); D.moments.push(m.get(k)); }
+    m.get(k).views.push(i);
+  });
+  for (const c of D.clips) $("#clip").insertAdjacentHTML("beforeend", `<option value="${c.name}">${short(c.name)} (${c.shots.length} shots)</option>`);
+  buildPredictors();
+  render();
+  pollRun();
+}
+
+// Every predictor as an array over views (null where missing).
+function buildPredictors() {
+  const P = {};
+  for (const k of Object.keys(D.views[0].pred)) P[k] = D.views.map((v) => v.pred[k]);
+  for (const [src, map] of Object.entries(D.preds)) P[src] = D.views.map((v) => map[v.id] ?? null);
+  Object.assign(P, extra);
+  D.P = P;
+  // Percentiles for the bars.
+  D.pct = {};
+  for (const [k, arr] of Object.entries(P)) {
+    const vals = arr.map((x, i) => [x, i]).filter(([x]) => x != null).sort((a, b) => a[0] - b[0]);
+    const pct = new Array(arr.length).fill(null);
+    vals.forEach(([, i], r) => (pct[i] = vals.length > 1 ? r / (vals.length - 1) : 1));
+    D.pct[k] = pct;
+  }
+  const names = Object.keys(P);
+  const cur = scoreBy || store.get("scoreBy", "interest_clip");
+  const order = (k) => (k.startsWith("prompt") || k.startsWith("probe") ? 0 : k.includes(".") ? 1 : 2);
+  names.sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+  $("#scoreBy").innerHTML = names.map((k) => `<option value="${k}">${label(k)} · ${coverage(k)}</option>`).join("");
+  scoreBy = names.includes(cur) ? cur : names[0];
+  $("#scoreBy").value = scoreBy;
+  const labeled = Object.values(D.labels).filter((l) => l.rating != null).length;
+  $("#coverage").textContent = `${D.views.length} views · ${D.moments.length} moments · ${labeled} labeled`;
+}
+
+// Shots you aimed yourself vs suggestions kept with their aim untouched (older exports have no source: count them as yours).
+const yours = (v) => v.shot_source !== "suggested";
+const SRC = { manual: "marked by you", reaimed: "re-aimed by you", suggested: "suggestion kept as-is" };
+const label = (k) => (NEG.test(k) ? "−" : "") + k;
+const coverage = (k) => { const n = D.P[k].filter((x) => x != null).length; return n === D.views.length ? "all" : n; };
+const score = (k, i) => { const x = D.P[k][i]; return x == null ? null : NEG.test(k) ? -x : x; };
+
+// MARK: Rendering
+
+function filteredMoments() {
+  const clip = $("#clip").value, onlyShots = $("#fShots").classList.contains("on"), unl = $("#fUnlabeled").classList.contains("on");
+  let ms = D.moments.filter((m) => (!clip || m.clip === clip) && (!onlyShots || m.shot) &&
+    (!unl || m.views.some((i) => D.labels[D.views[i].id]?.rating == null)));
+  const best = (m) => Math.max(...m.views.map((i) => score(scoreBy, i) ?? -Infinity));
+  const sort = $("#sort").value;
+  if (sort === "score") ms = [...ms].sort((a, b) => best(b) - best(a));
+  if (sort === "miss") ms = [...ms].filter((m) => m.shot).sort((a, b) => pickErr(b) - pickErr(a));
+  if (sort === "unsure") ms = [...ms].sort((a, b) => spread(a) - spread(b));
+  return ms;
+}
+function pick(m, k = scoreBy) {
+  let bi = null, bs = -Infinity;
+  for (const i of m.views) { const s = score(k, i); if (s != null && s > bs) { bs = s; bi = i; } }
+  return bi;
+}
+const pickErr = (m, k) => { const i = pick(m, k); return i == null || D.views[i].aim_err == null ? -1 : D.views[i].aim_err; };
+function spread(m) {
+  const s = m.views.map((i) => score(scoreBy, i)).filter((x) => x != null).sort((a, b) => b - a);
+  return s.length < 2 ? Infinity : s[0] - s[1];
+}
+
+function thumb(i, m, candI) {
+  const v = D.views[i], l = D.labels[v.id], p = D.pct[scoreBy][i];
+  const pk = m && pick(m) === i;
+  const aim = v.aim_err != null && v.aim_err <= 22.5;
+  return `<div class="thumb ${sel === i ? "sel" : ""} ${candI === i ? "candv" : ""}" data-i="${i}">
+    <img loading="lazy" src="/${v.file}" alt="">
+    ${aim ? (yours(v) ? '<div class="aim" title="Where you aimed"></div>' : '<div class="aim sugg" title="Where the suggestion you kept as-is aimed"></div>') : ""}
+    ${pk ? `<div class="pick" title="${scoreBy}'s pick"></div>` : ""}
+    ${l?.rating != null ? `<div class="lab r${l.rating}">${D.ratings[l.rating]}${l.notable ? " ★" : ""}</div>` : l?.notable ? '<div class="lab">★</div>' : ""}
+    ${p != null ? `<div class="bar" style="width:${(NEG.test(scoreBy) ? 1 - p : p) * 100}%"></div>` : ""}
+    <div class="yaw">${v.yaw > 0 ? "+" : ""}${Math.round(v.yaw)}°</div>
+  </div>`;
+}
+
+const legend = () => `<div class="legend">
+  <span><i class="sw" style="background:var(--aim)"></i>where you aimed (kept shot)</span>
+  <span><i class="sw sugg"></i>suggestion kept as-is</span>
+  <span><i class="dot"></i>${label(scoreBy)}'s pick for the moment</span>
+  <span><i class="sw" style="background:var(--pick)"></i>bar: ${label(scoreBy)} percentile</span>
+  <span><kbd>1</kbd>–<kbd>4</kbd> rate ${D.ratings.join(" / ")} · <kbd>0</kbd> clear · <kbd>n</kbd> notable · arrows move</span></div>`;
+
+function render() {
+  document.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+  $("#sortWrap").style.display = tab === "moments" ? "" : "none";
+  $("#fShots").parentElement.style.display = tab === "candidates" || tab === "metrics" ? "none" : "";
+  if (tab === "metrics") return renderMetrics();
+  if (tab === "candidates") return renderCandidates();
+  const main = $("#main");
+  if (tab === "moments") {
+    const ms = filteredMoments();
+    main.innerHTML = legend() + ms.slice(0, shown).map((m) => `<div class="moment"><div class="head">
+        <b>${short(m.clip)}</b><span>${clock(m.time)}</span>${m.shot ? `<span class="shot ${m.src === "suggested" ? "sugg" : ""}">${m.shot}${SRC[m.src] ? " · " + SRC[m.src] : ""}</span>` : ""}
+        ${m.shot && pick(m) != null ? `<span>pick is ${Math.round(D.views[pick(m)].aim_err)}° from your aim</span>` : ""}
+      </div><div class="strip">${m.views.map((i) => thumb(i, m)).join("")}</div></div>`).join("") +
+      (ms.length > shown ? `<div class="more"><button id="more">Show more (${ms.length - shown} left)</button></div>` : "") +
+      (ms.length ? "" : '<p class="note">No moments match these filters.</p>');
+  } else {
+    const ms = filteredMoments();
+    const idx = ms.flatMap((m) => m.views).filter((i) => !$("#fUnlabeled").classList.contains("on") || D.labels[D.views[i].id]?.rating == null);
+    idx.sort((a, b) => (score(scoreBy, b) ?? -Infinity) - (score(scoreBy, a) ?? -Infinity));
+    main.innerHTML = legend() + `<div class="grid">${idx.slice(0, shown).map((i) => thumb(i)).join("")}</div>` +
+      (idx.length > shown ? `<div class="more"><button id="more">Show more (${idx.length - shown} left)</button></div>` : "");
+  }
+  $("#more")?.addEventListener("click", () => { shown += 400; render(); });
+}
+
+async function renderSide() {
+  const side = $("#side");
+  if (sel == null) return;
+  const v = D.views[sel], l = D.labels[v.id] || {};
+  const rows = Object.keys(D.P).map((k) => [k, D.P[k][sel], D.pct[k][sel]]).filter(([, x]) => x != null);
+  side.innerHTML = `<img src="/${v.file}" alt="">
+    <h2>${short(v.clip)} · ${clock(v.time)} · ${v.yaw > 0 ? "+" : ""}${Math.round(v.yaw)}°</h2>
+    <div class="meta">${v.shot ? `In “${v.shot}”: ${Math.round(v.aim_err)}° from where you aimed` : "Not in a kept shot"}</div>
+    <div class="rate">${D.ratings.map((r, k) => `<button data-rate="${k}" class="${l.rating === k ? "on" : ""}">${k + 1} ${r}</button>`).join("")}
+      <button data-notable class="${l.notable ? "on" : ""}" title="Notable">★</button></div>
+    <div class="kv">${rows.map(([k, x, p]) => `<span class="k" title="${k}">${label(k)}</span><span class="v">${fmt(x, 3)}</span>
+      <span class="p"><i style="width:${(NEG.test(k) ? 1 - p : p) * 100}%"></i></span>`).join("")}</div>
+    <div id="detail" class="note">Loading model details…</div>
+    <p class="note">${v.id}</p>`;
+  const d = await api("/api/detail?id=" + encodeURIComponent(v.id));
+  if (D.views[sel]?.id !== v.id) return;
+  const parts = [];
+  for (const [src, x] of Object.entries(d)) {
+    const det = x.detail || {};
+    if (det.caption) parts.push(`<div class="caption"><b>${src}</b>: ${det.caption}</div><div class="chips">${(det.tags || []).map((t) => `<span>${t}</span>`).join("")}</div>`);
+    if (det.subject) parts.push(`<div class="caption"><b>${src.split(".")[0]}</b> subject: ${det.subject} ` +
+      `<span class="chips">${Object.entries(det.probabilities).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, p]) => `<span>${k} ${fmt(p * 100, 0)}%</span>`).join("")}</span></div>`);
+  }
+  $("#detail").innerHTML = parts.join("") || "No model has scored this view yet.";
+}
+
+// MARK: Metrics
+
+const aimMoment = (m) => m.shot && (store.get("aimSet", "yours") === "all" || yours(D.views[m.views[0]]));
+function aimStats(k) {
+  // Moments in your shots where every view has a value: how far the predictor's pick is from your aim.
+  const errs = [];
+  for (const m of D.moments) {
+    if (!aimMoment(m) || m.views.some((i) => D.P[k][i] == null)) continue;
+    errs.push(D.views[pick(m, k)].aim_err);
+  }
+  if (!errs.length) return null;
+  return { n: errs.length, mean: errs.reduce((a, b) => a + b, 0) / errs.length,
+    hit: errs.filter((e) => e <= 22.5).length / errs.length, near: errs.filter((e) => e <= 67.5).length / errs.length };
+}
+function aucOf(scores, ys) {
+  const idx = scores.map((s, i) => [s, ys[i]]).sort((a, b) => a[0] - b[0]);
+  let r = 0, npos = 0, sum = 0;
+  for (let i = 0; i < idx.length; ) {   // average ranks for ties
+    let j = i; while (j < idx.length && idx[j][0] === idx[i][0]) j++;
+    const avg = (i + j + 1) / 2;
+    for (let q = i; q < j; q++) if (idx[q][1]) { sum += avg; npos++; }
+    i = j;
+  }
+  const nneg = idx.length - npos;
+  return npos && nneg ? (sum - (npos * (npos + 1)) / 2) / (npos * nneg) : null;
+}
+function spearman(a, b) {
+  const rank = (x) => { const o = x.map((v, i) => [v, i]).sort((p, q) => p[0] - q[0]); const r = []; o.forEach(([, i], k) => (r[i] = k)); return r; };
+  const ra = rank(a), rb = rank(b), n = a.length, ma = (n - 1) / 2;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { num += (ra[i] - ma) * (rb[i] - ma); da += (ra[i] - ma) ** 2; db += (rb[i] - ma) ** 2; }
+  return n > 2 ? num / Math.sqrt(da * db) : null;
+}
+function truthRows(t) {
+  const human = () => D.views.map((v, i) => [i, D.labels[v.id]?.rating]).filter(([, r]) => r != null).map(([i, r]) => [i, r >= POS_RATING ? 1 : 0, r]);
+  const aim = (only) => D.views.map((v, i) => [i, v]).filter(([, v]) => v.aim_err != null && (!only || yours(v))).map(([i, v]) => [i, v.aim_err <= 22.5 ? 1 : 0, -v.aim_err]);
+  if (t === "human") return human();
+  if (t === "aim") return aim(false);
+  if (t === "aim_yours") return aim(true);
+  if (t === "taste") {   // your aims plus your ratings; a rating wins where both say something (ranked by yes/no)
+    const m = new Map(aim(true).map(([i, y]) => [i, [i, y, y]]));
+    for (const [i, y] of human()) m.set(i, [i, y, y]);
+    return [...m.values()];
+  }
+  return D.P[t].map((x, i) => [i, x]).filter(([, x]) => x != null).map(([i, x]) => [i, x >= 0.5 ? 1 : 0, x]);
+}
+
+function renderMetrics() {
+  const truth = store.get("truth", "aim_yours");
+  const sources = Object.keys(D.P).filter((k) => k.includes(".") && !k.startsWith("probe"));
+  const truths = [["aim_yours", "Your aim (shots you aimed yourself)"], ["aim", "Your aim (all kept shots)"],
+    ["taste", "Your taste (your aims + your labels)"], ["human", "Your labels"], ...sources.map((k) => [k, `${k} ≥ 0.5 (as teacher)`])];
+  const aimSet = store.get("aimSet", "yours");
+  const nYours = D.moments.filter((m) => m.shot && yours(D.views[m.views[0]])).length, nAll = D.moments.filter((m) => m.shot).length;
+  const T = truthRows(truth);
+  const rows = Object.keys(D.P).filter((k) => k !== truth).map((k) => {
+    const pts = T.filter(([i]) => D.P[k][i] != null);
+    const s = pts.map(([i]) => score(k, i));
+    return { k, cover: D.P[k].filter((x) => x != null).length, n: pts.length, auc: aucOf(s, pts.map(([, y]) => y)),
+      rho: spearman(s, pts.map(([, , r]) => r)), aim: aimStats(k) };
+  });
+  rows.sort((a, b) => (b.aim?.hit ?? -1) - (a.aim?.hit ?? -1) || (b.auc ?? 0) - (a.auc ?? 0));
+  const bestHit = Math.max(...rows.map((r) => r.aim?.hit ?? 0));
+  const nPos = T.filter(([, y]) => y).length;
+  const prompts = store.get("prompts", { pos: "a beautiful landscape\nfriends smiling at the camera\na waterfall", neg: "the inside of a car\nthe ground\na blurry photo" });
+  $("#main").innerHTML = `
+  <div class="cards">
+    <div class="card"><h3>Ground truth</h3>
+      <p>AUC and Spearman below compare each signal with this. Aim columns always use your kept shots:
+      for each moment in a shot, which of the eight views the signal picks, and how far that is from where you aimed
+      (views are 45° apart, so ≤22.5° is the right view and ≤67.5° is the right one or a neighbour).</p>
+      <div class="row"><select id="truth">${truths.map(([k, n]) => `<option value="${k}" ${k === truth ? "selected" : ""}>${n}</option>`).join("")}</select>
+      <span class="note">${T.length} views, ${nPos} positive</span></div>
+      <div class="row">Aim columns use <select id="aimSet">
+        <option value="yours" ${aimSet === "yours" ? "selected" : ""}>shots you aimed yourself (${nYours} moments)</option>
+        <option value="all" ${aimSet === "all" ? "selected" : ""}>all kept shots (${nAll} moments)</option></select></div>
+      <p>A suggestion you kept without re-aiming agrees with the app by construction, so “all kept shots” flatters
+      today's signals. Random picks average about 90° from your aim and hit the right view 1 time in 8 (12.5%).</p></div>
+    <div class="card"><h3>Probe on the CLIP embeddings</h3>
+      <p>A linear classifier on each view's 512-d MobileCLIP vector, trained on the ground truth above and
+      cross-validated by clip. This is the cheap, on-device way to steer CLIP toward your taste (or distil a VLM teacher).
+      Weights are saved to the data folder's probes/.</p>
+      <p>Its rows below are out-of-fold: each clip is scored by a probe that never saw it.</p>
+      <div class="row"><button id="probe">Train probe on “${truths.find((t) => t[0] === truth)?.[1] || truth}”</button></div>
+      <div id="probeOut" class="status">${Object.entries(probeInfo).map(([k, r]) => `${k}: cross-validated AUC ${fmt(r.cv_auc)} on ${r.n} views (${r.positives} positive)`).join("\n")}</div></div>
+    <div class="card"><h3>Prompt playground</h3>
+      <p>Score every view by MobileCLIP similarity: mean over the prompts on the left minus the right. One per line.</p>
+      <div class="row" style="align-items:stretch"><div style="flex:1"><textarea id="pPos" rows="4" placeholder="worth filming">${prompts.pos}</textarea></div>
+      <div style="flex:1"><textarea id="pNeg" rows="4" placeholder="junk (optional)">${prompts.neg}</textarea></div></div>
+      <div class="row"><button id="pRun">Score views</button><span id="pOut" class="status"></span></div></div>
+  </div>
+  <table><thead><tr><th>Signal</th><th>Views scored</th><th>AUC</th><th>Spearman</th><th>Aim moments</th><th>Aim error</th><th>Right view</th><th>Right or next</th></tr></thead>
+  <tbody>${rows.map((r) => `<tr class="${r.aim && r.aim.hit === bestHit ? "best" : ""}"><td>${label(r.k)}</td><td class="num">${r.cover}</td>
+    <td class="num">${r.auc == null ? "–" : `<span class="b" style="width:${Math.max(0, r.auc - 0.5) * 120}px"></span>${fmt(r.auc)}`}</td>
+    <td class="num">${fmt(r.rho)}</td><td class="num">${r.aim?.n ?? "–"}</td><td class="num">${r.aim ? fmt(r.aim.mean, 0) + "°" : "–"}</td>
+    <td class="num">${r.aim ? `<span class="b" style="width:${r.aim.hit * 80}px"></span>${fmt(r.aim.hit * 100, 0)}%` : "–"}</td>
+    <td class="num">${r.aim ? fmt(r.aim.near * 100, 0) + "%" : "–"}</td></tr>`).join("")}</tbody></table>`;
+
+  $("#truth").onchange = (e) => { store.set("truth", e.target.value); renderMetrics(); };
+  $("#aimSet").onchange = (e) => { store.set("aimSet", e.target.value); renderMetrics(); };
+  $("#probe").onclick = async () => {
+    $("#probeOut").textContent = "training…";
+    try {
+      const r = await api("/api/probe", { truth });
+      extra[r.name] = r.values; probeInfo[r.name] = r; buildPredictors();
+      renderMetrics();
+    } catch (e) { $("#probeOut").textContent = e.message; }
+  };
+  $("#pRun").onclick = async () => {
+    const pos = $("#pPos").value.split("\n"), neg = $("#pNeg").value.split("\n");
+    store.set("prompts", { pos: $("#pPos").value, neg: $("#pNeg").value });
+    $("#pOut").textContent = "embedding…";
+    try {
+      const r = await api("/api/prompt", { positive: pos, negative: neg });
+      const name = "prompt:" + pos.filter((s) => s.trim())[0].slice(0, 24) + (neg.some((s) => s.trim()) ? " − junk" : "");
+      extra[name] = r.values; scoreBy = name; store.set("scoreBy", name); buildPredictors();
+      renderMetrics();
+      $("#pOut").textContent = `added “${name}”; it's the Score by signal now`;
+    } catch (e) { $("#pOut").textContent = e.message; }
+  };
+}
+
+// MARK: Candidates (active learning: rate what the signal is surest about, and least sure about, outside your shots)
+
+let cand = null;   // [{m, i, why, s}] fixed until the signal, clip or mode changes, so rating doesn't reshuffle it
+
+function buildCandidates() {
+  const k = scoreBy, clip = $("#clip").value, mode = store.get("candMode", "mix");
+  const isProbe = k.startsWith("probe"), isProb = k.includes(".") && !isProbe;
+  // "Unsure" is distance to the signal's decision line: 0 for a probe's logit, 0.5 for a model's
+  // probability, the median (percentile 0.5) otherwise.
+  const dist = (j) => isProbe ? Math.abs(D.P[k][j]) : isProb ? Math.abs(D.P[k][j] - 0.5) : Math.abs(D.pct[k][j] - 0.5);
+  const unrated = (j) => D.labels[D.views[j].id]?.rating == null;
+  const top = [], unsure = [];
+  for (const m of D.moments) {
+    if (m.shot || (clip && m.clip !== clip)) continue;
+    const i = pick(m);
+    if (i != null && unrated(i)) top.push({ m, i, why: "top", s: score(k, i) });
+    let bu = null, bd = Infinity;
+    for (const j of m.views) if (D.P[k][j] != null && unrated(j) && dist(j) < bd) { bd = dist(j); bu = j; }
+    if (bu != null) unsure.push({ m, i: bu, why: "unsure", s: score(k, bu), d: bd });
+  }
+  top.sort((a, b) => b.s - a.s);
+  unsure.sort((a, b) => a.d - b.d);
+  if (mode === "top") return top;
+  if (mode === "unsure") return unsure;
+  // Mix: two of the best for every unsure one, never the same moment twice.
+  const out = [], seen = new Set();
+  let a = 0, b = 0;
+  while (a < top.length || b < unsure.length) {
+    for (const c of [top[a++], top[a++], unsure[b++]]) if (c && !seen.has(c.m)) { seen.add(c.m); out.push(c); }
+  }
+  return out;
+}
+
+function renderCandidates() {
+  const fresh = !cand;
+  if (fresh) cand = buildCandidates();
+  const mode = store.get("candMode", "mix");
+  const rated = cand.filter((c) => D.labels[D.views[c.i].id]?.rating != null).length;
+  const tp = probeInfo["probe:taste"];
+  $("#main").innerHTML = `<div class="card intro"><h3>Candidates: moments you didn't keep</h3>
+    <p>Views from moments outside every kept shot, chosen by <b>${label(scoreBy)}</b> (the Score by menu).
+    <span class="why top">best</span> is the view the signal likes most in a moment you skipped: rate it to tell the
+    signal whether it found something you missed. <span class="why unsure">unsure</span> is the view nearest its decision line,
+    where one answer teaches a probe the most. Rate with <kbd>1</kbd>–<kbd>4</kbd> (Junk / Filler / Good / Great); it moves to the next candidate.</p>
+    <p>After a batch, train the taste probe: it learns from your own aims plus every rating, becomes the Score by signal,
+    and the queue re-ranks with what it learned.</p>
+    <div class="row"><select id="candMode">
+      <option value="mix" ${mode === "mix" ? "selected" : ""}>Mix: best and unsure</option>
+      <option value="top" ${mode === "top" ? "selected" : ""}>Best moments you didn't keep</option>
+      <option value="unsure" ${mode === "unsure" ? "selected" : ""}>Least sure first</option></select>
+      <button id="candTrain">Train taste probe and re-rank</button>
+      <span id="candOut" class="status">${rated} rated · ${cand.length - rated} to go${tp ? ` · probe:taste cross-validated AUC ${fmt(tp.cv_auc)} on ${tp.n} views` : ""}</span></div></div>` +
+    cand.slice(0, shown).map((c) => {
+      const done = D.labels[D.views[c.i].id]?.rating != null;
+      return `<div class="moment ${done ? "done" : ""}"><div class="head"><span class="why ${c.why}">${c.why === "top" ? "best" : "unsure"}</span>
+        <b>${short(c.m.clip)}</b><span>${clock(c.m.time)}</span><span>${label(scoreBy)} ${fmt(D.P[scoreBy][c.i], 3)}</span></div>
+        <div class="strip">${c.m.views.map((i) => thumb(i, c.m, c.i)).join("")}</div></div>`;
+    }).join("") +
+    (cand.length > shown ? `<div class="more"><button id="more">Show more (${cand.length - shown} left)</button></div>` : "") +
+    (cand.length ? "" : '<p class="note">No candidates: every moment outside your shots is rated, or this signal has no scores there.</p>');
+  $("#more")?.addEventListener("click", () => { shown += 400; render(); });
+  $("#candMode").onchange = (e) => { store.set("candMode", e.target.value); cand = null; render(); };
+  $("#candTrain").onclick = async (e) => {
+    e.target.disabled = true; $("#candOut").textContent = "training on your aims and ratings…";
+    try {
+      const r = await api("/api/probe", { truth: "taste" });
+      extra[r.name] = r.values; probeInfo[r.name] = r;
+      scoreBy = r.name; store.set("scoreBy", r.name); buildPredictors();
+      cand = null; sel = null; shown = 400; render(); selectCandidate(0);
+    } catch (err) { $("#candOut").textContent = err.message; e.target.disabled = false; }
+  };
+  if (fresh || sel == null || !cand.some((c) => c.m.views.includes(sel))) selectCandidate(0);
+}
+
+// Select the first unrated candidate at or after position k.
+function selectCandidate(k) {
+  const n = cand.findIndex((c, q) => q >= k && D.labels[D.views[c.i].id]?.rating == null);
+  if (n < 0) return renderSide();
+  if (n >= shown) { shown = n + 100; renderCandidates(); }
+  select(cand[n].i);
+}
+
+function candCount() {
+  const el = $("#candOut");
+  if (!el || !cand) return;
+  const rated = cand.filter((c) => D.labels[D.views[c.i].id]?.rating != null).length;
+  el.textContent = el.textContent.replace(/^\d+ rated · \d+ to go/, `${rated} rated · ${cand.length - rated} to go`);
+}
+
+// MARK: Model runs (the bar under the header; it also follows runs started with `lab.py run`)
+
+let models = null, lastPreds = 0, runTimer = null, barKey = "", metricsAt = 0;
+
+async function pollRun() {
+  clearTimeout(runTimer);
+  let s;
+  try { s = await api("/api/status" + (lastPreds ? `?since=${lastPreds}` : "")); }
+  catch (e) { $("#runbar").textContent = "Lab server unreachable: " + e.message; runTimer = setTimeout(pollRun, 10000); return; }
+  if (!lastPreds) lastPreds = s.now;
+  else if (s.preds && Object.keys(s.preds).length) {
+    lastPreds = s.now;
+    for (const [src, map] of Object.entries(s.preds)) Object.assign((D.preds[src] ||= {}), map);
+    buildPredictors();
+    // Refresh the table now and then, but never under someone typing a prompt.
+    if (tab === "metrics" && Date.now() - metricsAt > 15000 && !document.activeElement.matches("textarea, input, select")) {
+      metricsAt = Date.now(); renderMetrics();
+    }
+  } else lastPreds = s.now;
+  if (!models) models = await api("/api/models").catch(() => []);
+  renderRunbar(s.job);
+  const live = s.job && ["running", "paused", "stopping"].includes(s.job.state);
+  runTimer = setTimeout(pollRun, live ? 3000 : 15000);
+}
+
+function renderRunbar(j) {
+  const bar = $("#runbar");
+  const live = j && ["running", "paused", "stopping"].includes(j.state);
+  // Idle: only redraw when something changed, so the picker doesn't reset under you.
+  const key = live ? "" : JSON.stringify([j?.id, j?.state, j?.done, (models || []).length]);
+  if (!live && key === barKey) return;
+  barKey = key;
+  if (!live) bar.dataset.shape = "";
+  const pick = `<select id="runModel">${(models || []).map((m) => `<option value="${m.name}" ${j?.model === m.name ? "selected" : ""}>${m.name} (${m.kind})</option>`).join("")}</select>`;
+  if (!live) {
+    const last = j ? `<span>Last run: ${j.model}, <span class="state ${j.state}">${j.state}</span> at ${j.done}/${j.total}</span>` : "<span>No model runs yet.</span>";
+    bar.innerHTML = `<b style="color:var(--text);font-weight:500">Label with a model</b> ${pick}
+      <input id="runLimit" type="number" min="1" placeholder="all" style="width:70px" title="How many views (blank: every view it hasn't scored)">
+      <button id="runStart">${j && j.state !== "done" && j.done < j.total ? "Resume" : "Start"}</button> ${last}`;
+    $("#runStart").onclick = async () => {
+      try { await api("/api/run", { model: $("#runModel").value, limit: +$("#runLimit").value || null }); pollRun(); }
+      catch (e) { alert(e.message); }
+    };
+    return;
+  }
+  const per = j.done ? j.seconds / j.done : 0, left = (j.total - j.done) * per;
+  const eta = !per ? "" : left > 3600 ? `~${(left / 3600).toFixed(1)} h left` : `~${Math.max(1, Math.round(left / 60))} min left`;
+  // Rebuild only when the run or its state changes; otherwise update in place, so a click on
+  // Pause/Stop is never lost to a redraw.
+  const shape = `${j.id}|${j.state}`;
+  if (bar.dataset.shape !== shape) {
+    bar.dataset.shape = shape;
+    barKey = "";
+    bar.innerHTML = `<span class="state ${j.state}">${j.state}</span> <b style="color:var(--text);font-weight:500">${j.model}</b>
+      <div class="track"><i></i></div><span class="nums"></span>
+      ${j.state === "paused" ? '<button id="runResume">Resume</button>' : '<button id="runPause">Pause</button>'}
+      <button id="runStop">Stop</button><span class="err"></span>`;
+    const ctl = (path) => async (e) => { e.target.disabled = true; await api(path, {}); pollRun(); };
+    $("#runPause") && ($("#runPause").onclick = ctl("/api/pause"));
+    $("#runResume") && ($("#runResume").onclick = ctl("/api/resume"));
+    $("#runStop").onclick = ctl("/api/stop");
+  }
+  bar.querySelector(".track i").style.width = `${(100 * j.done) / Math.max(j.total, 1)}%`;
+  bar.querySelector(".nums").textContent = `${j.done} / ${j.total}${per ? ` · ${per.toFixed(2)} s/view` : ""}` +
+    (j.state === "running" && eta ? " · " + eta : j.state === "paused" ? " · paused (resumes where it left off)" : "");
+  const err = bar.querySelector(".err");
+  err.textContent = j.errors ? `${j.errors} errors: ${j.last_error || ""}` : "";
+  err.title = j.last_error || "";
+}
+
+// MARK: Interaction
+
+// Labels update locally at once (so fast keying never races a save) and save in the background.
+function rate(i, rating, notable) {
+  const v = D.views[i], cur = D.labels[v.id] || {};
+  const next = { rating: rating === undefined ? cur.rating ?? null : rating, notable: notable === undefined ? !!cur.notable : notable };
+  if (next.rating == null && !next.notable) delete D.labels[v.id]; else D.labels[v.id] = next;
+  api("/api/label", { id: v.id, ...next }).catch((e) => alert("Couldn't save the label: " + e.message));
+  const labeled = Object.values(D.labels).filter((l) => l.rating != null).length;
+  $("#coverage").textContent = `${D.views.length} views · ${D.moments.length} moments · ${labeled} labeled`;
+  refreshThumb(i);
+}
+
+function select(i, scroll = true) {
+  sel = i;
+  document.querySelectorAll(".thumb.sel").forEach((t) => t.classList.remove("sel"));
+  const el = document.querySelector(`.thumb[data-i="${i}"]`);
+  el?.classList.add("sel");
+  if (scroll) el?.scrollIntoView({ block: "nearest" });
+  renderSide();
+}
+
+function refreshThumb(i) {
+  const el = document.querySelector(`.thumb[data-i="${i}"]`);
+  if (!el) return;
+  if (tab === "candidates") {
+    const c = cand?.find((c) => c.m.views.includes(i));
+    el.outerHTML = thumb(i, c?.m, c?.i);
+    const row = document.querySelector(`.thumb[data-i="${i}"]`)?.closest(".moment");
+    if (c && row) row.classList.toggle("done", D.labels[D.views[c.i].id]?.rating != null);
+    return candCount();
+  }
+  const m = tab === "moments" ? D.moments.find((m) => m.views.includes(i)) : null;
+  el.outerHTML = thumb(i, m);
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest(".thumb");
+  if (t) return select(+t.dataset.i, false);
+  const tb = e.target.closest("[data-tab]");
+  if (tb) { tab = tb.dataset.tab; shown = 400; return render(); }
+  const r = e.target.closest("[data-rate]");
+  if (r && sel != null) { const k = +r.dataset.rate; rate(sel, D.labels[D.views[sel].id]?.rating === k ? null : k); renderSide(); }
+  if (e.target.closest("[data-notable]") && sel != null) { rate(sel, undefined, !D.labels[D.views[sel].id]?.notable); renderSide(); }
+});
+for (const id of ["#fShots", "#fUnlabeled"]) $(id).addEventListener("click", (e) => { e.target.classList.toggle("on"); shown = 400; render(); });
+$("#scoreBy").addEventListener("change", (e) => { scoreBy = e.target.value; store.set("scoreBy", scoreBy); cand = null; render(); if (sel != null) renderSide(); });
+$("#clip").addEventListener("change", () => { shown = 400; cand = null; render(); });
+$("#sort").addEventListener("change", () => { shown = 400; render(); });
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input, textarea, select") || tab === "metrics") return;
+  const thumbs = [...document.querySelectorAll(".thumb")].map((t) => +t.dataset.i);
+  const at = thumbs.indexOf(sel);
+  const cols = tab !== "grid" ? 8 : Math.max(1, Math.round($(".grid")?.clientWidth / 156) || 1);
+  const move = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols }[e.key];
+  if (move) { e.preventDefault(); const n = at < 0 ? 0 : Math.min(Math.max(at + move, 0), thumbs.length - 1); return select(thumbs[n]); }
+  if (sel == null) return;
+  if (e.key.length === 1 && "1234".includes(e.key)) {
+    rate(sel, +e.key - 1);
+    if (tab === "candidates") return selectCandidate(cand.findIndex((c) => c.m.views.includes(sel)) + 1);
+    const n = thumbs[at + 1]; n != null ? select(n) : renderSide();
+  } else if (e.key === "0") { rate(sel, null, false); renderSide(); }
+  else if (e.key === "n") { rate(sel, undefined, !D.labels[D.views[sel].id]?.notable); renderSide(); }
+});
+
+load().catch((e) => ($("#main").innerHTML = `<p class="note">Couldn't load: ${e.message}</p>`));
+</script>
+</body>
+</html>

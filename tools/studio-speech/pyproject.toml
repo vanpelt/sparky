@@ -1,0 +1,6 @@
+[project]
+name = "studio-speech"
+version = "0.1.0"
+description = "Transcribe Reframe's cloud proxies and log each Studio clip's speech and interest, for the studio-edit skill"
+requires-python = ">=3.11"
+dependencies = ["mlx-whisper"]

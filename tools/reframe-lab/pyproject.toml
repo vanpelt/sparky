@@ -1,0 +1,8 @@
+[project]
+name = "reframe-lab"
+version = "0.1.0"
+description = "Label, score and compare what Reframe uses to pick shots: view grid, VLM labellers, CLIP prompts and probes"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+]

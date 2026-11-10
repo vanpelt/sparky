@@ -1,0 +1,9 @@
+[project]
+name = "resolve"
+version = "0.1.0"
+description = "Drive DaVinci Resolve Studio's timeline from the command line: inspect, contact sheets, LUTs, music swaps."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false
