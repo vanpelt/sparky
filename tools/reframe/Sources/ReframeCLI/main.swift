@@ -16,6 +16,9 @@ import simd
 //   reframe-cli models [status|install|remove]
 //   reframe-cli index <file.insv | folder | cloud>... [--no-cache]     (MobileCLIP embeddings, SEMANTIC.md)
 //   reframe-cli search "<query>" <file.insv | folder | cloud>... [--limit N] [--stills dir] [--shots] [--raw]
+//   reframe-cli studio <footage folder | cloud> <project name> [--register] [--replace]   (write a Studio timeline)
+//   reframe-cli studio list | dump <project> [--json] | frame <project> <time> <out.png>
+//                     | sheet <project> <out dir | out.png> [--clip N] [--per-clip 3] [--lut f.cube]
 //   reframe-cli cloud login|logout|status|list [--raw]|probe <name|mediaId>|fetch <name> [--original]
 //                     |migrate [--dry-run]   (Insta360 Cloud, CLOUD.md)
 
@@ -128,6 +131,11 @@ case "export":
 case "studio":
     // reframe-cli studio <footage-folder> <project-name> [--register] [--replace] [--root dir] [--tolerance deg] [--fps 24]
     // Writes the folder's saved shots as an Insta360 Studio timeline project.
+    // studio list|dump|frame|sheet reads projects back (StudioPreview.swift).
+    if let sub = args.first, ["list", "dump", "frame", "sheet", "beats", "apply", "handles", "conform"].contains(sub) {
+        try await studioCommand(sub, Array(args.dropFirst()))
+        break
+    }
     guard args.count >= 2 else { fail("studio <footage-folder> <project-name> [--register] [--replace] [--root dir]") }
     // "cloud" = the shots on Insta360 Cloud clips (their own store).
     let store = ShotStore.load(folder: args[0] == "cloud" ? CloudCache.root : URL(fileURLWithPath: args[0]))

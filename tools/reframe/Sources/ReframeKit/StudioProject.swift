@@ -161,26 +161,31 @@ public enum StudioProject {
         try data.write(to: folder.appendingPathComponent("\(id)_backup.insproj"), options: .atomic)
         try json(album(items)).write(to: folder.appendingPathComponent("project_album_info.data"), options: .atomic)
 
-        if register {
-            var index: [String: Any] = ["projects": [Any]()]
-            if let d = try? Data(contentsOf: indexURL),
-               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { index = o }
-            var list = (index["projects"] as? [[String: Any]] ?? []).filter {
-                ($0["projectPath"] as? String) != folder.path
-            }
-            var entry = project
-            entry.removeValue(forKey: "tracks")
-            list.append(entry)
-            index["projects"] = list
-            // Keep the list as it was before Reframe first touched it.
-            let backup = indexURL.deletingPathExtension().appendingPathExtension("insproj.reframe-backup")
-            if FileManager.default.fileExists(atPath: indexURL.path) && !FileManager.default.fileExists(atPath: backup.path) {
-                try FileManager.default.copyItem(at: indexURL, to: backup)
-            }
-            try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try json(index).write(to: indexURL, options: .atomic)
-        }
+        if register { try self.register(project, folder: folder) }
         return file
+    }
+
+    /// Adds (or refreshes) a project's entry in Studio's project list. Studio must be quit.
+    static func register(_ project: [String: Any], folder: URL) throws {
+        var index: [String: Any] = ["projects": [Any]()]
+        if let d = try? Data(contentsOf: indexURL),
+           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] { index = o }
+        var list = index["projects"] as? [[String: Any]] ?? []
+        var entry = project
+        entry.removeValue(forKey: "tracks")
+        if let i = list.firstIndex(where: { ($0["projectPath"] as? String) == folder.path }) {
+            list[i] = entry
+        } else {
+            list.append(entry)
+        }
+        index["projects"] = list
+        // Keep the list as it was before Reframe first touched it.
+        let backup = indexURL.deletingPathExtension().appendingPathExtension("insproj.reframe-backup")
+        if FileManager.default.fileExists(atPath: indexURL.path) && !FileManager.default.fileExists(atPath: backup.path) {
+            try FileManager.default.copyItem(at: indexURL, to: backup)
+        }
+        try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try json(index).write(to: indexURL, options: .atomic)
     }
 
     // MARK: Building
@@ -357,7 +362,7 @@ public enum StudioProject {
         return f.string(from: d)
     }
 
-    static func json(_ o: Any) throws -> Data {
+    public static func json(_ o: Any) throws -> Data {
         try JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 

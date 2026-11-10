@@ -214,8 +214,59 @@ projects Studio saved and frames matched against Reframe renders:
   `pan = view-base heading + yaw − heading at t=0` (within 2° on six test frames) and adds
   keyframes wherever the camera turns enough that Studio's interpolation would drift from the
   shot by more than 2°. Lock and Off shots export as plain Studio stabilization.
-- Not handled yet: clip transitions (no saved example), aspect ratios other than 16:9, cameras
-  other than the X6.
+- Music: a track of `type` 2 holds audio clips (Studio's library music has a `resourceId` and a
+  path under `~/Documents/Insta360/Studio/Download/audio`), with `audio_setting.currentVolume`.
+- Not handled yet: clip transitions (no saved example), speed changes (`play_rate_track`),
+  aspect ratios other than 16:9, cameras other than the X6.
+
+Reading projects back (`StudioTimeline`, for reviewing an edit made or tweaked in Studio):
+
+    reframe-cli studio list                                  # projects, newest first
+    reframe-cli studio dump <project> [--json]               # clips, trims, keyframes in s and °
+    reframe-cli studio frame <project> <time> <out.png> [--width 1280] [--lut f.cube]
+    reframe-cli studio sheet <project> <out-dir | out.png> [--clip N] [--per-clip 3] [--rows 6] [--lut f.cube]
+
+`<project>` is a project name, folder or `.insproj`; times are seconds or `m:ss.s` on the timeline.
+Frames are Reframe renders of Studio's keyframes from the LRV proxy (linear between keyframes, as
+Studio's default easing), so framing and timing match Studio while stitching and colour are
+Reframe's; `--lut` applies a look to I-Log clips. Checked against Studio's own view, including a
+shot 3:46 into a 6-minute file. (Studio's `first_frame.jpg` beside each project is a thumbnail of
+0:00 but can be stale, so it isn't a reliable reference.)
+
+Editing (`StudioEdit`, `MusicBeats`):
+
+    reframe-cli studio dump <project> --spec > edit.json      # the timeline as an edit spec
+    reframe-cli studio beats <project | audio file> [--json]  # BPM, bars, loudness, section changes
+    reframe-cli studio apply edit.json [--dry-run] [--as "New name"] [--replace] [--quit-studio] [--open]
+                                       [--root dir]           # (--root: test copy, not registered)
+
+An edit spec lists the timeline's clips in order, each copied from a clip of an existing project
+(`from`: its number in `dump`), with optional `in`/`out` (source seconds), `keyframes` (degrees;
+pan is a world direction from the file's first-frame heading), `adjust` (offsets every keyframe)
+and `volume` (camera audio); per clip, `music: "duck" | "off" | "full" | percent` sets the music
+under it (music clips are split at those boundaries, since Studio has no volume keyframes on
+music). `music` places music clips by time (`start`) or by clip (`atClip`, `untilClip`), with
+`fit` (end with the video) and `fadeIn`/`fadeOut`; `snap: "bar" | "beat"` moves each cut to the
+nearest bar or beat of the music playing there (`"snap": false` on a clip keeps its out-point).
+On a clip with a speed change, `in`/`out` are real source seconds and `duration` is timeline
+seconds; Studio keeps such a clip's trims and keyframe `time` on a stretched clock (source frames
+÷ speed) and the real frames in `source_*_trim`/`src_time`. Clips are packed end to end and keep
+every setting the spec doesn't touch. Without `--as`, the project is updated in place and the previous
+version kept in `<project>/.reframe-history/`. Studio must be quit to write (it rewrites its
+project list). Beats: spectral-flux onsets, autocorrelation tempo (60–200 BPM, can land on half
+or double time), Ellis's dynamic-programming tracker, 4/4 bars phased by bass energy. 
+
+Handing a cut to Resolve or Final Cut (`StudioConform`):
+
+    reframe-cli studio handles <cut> [--seconds 1] [--quit-studio] [--open]   # writes "<cut> handles" + reframe-conform.json
+    # export "<cut> handles" from Studio as one ProRes file, then:
+    reframe-cli studio conform "<cut> handles" <export.mov> <out dir>        # clips/ music/ <cut>.fcpxml <cut>.otio
+
+`handles` widens every clip (clamped to its recording), drops music and effects and sets camera
+audio to 100 %; `conform` checks the export's length, cuts it per clip with a stream copy
+(ProRes is all-intra, so frame-exact; audio to PCM) and writes timelines trimmed back to the cut,
+with camera levels and the music pieces (levels, fades) on their own lane. The Claude skill in
+`.claude/skills/studio-edit` drives all of this.
 
 ## What we know about X6 files (firmware v1.2.36)
 
