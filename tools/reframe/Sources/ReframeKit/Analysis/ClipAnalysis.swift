@@ -115,6 +115,15 @@ public enum Analyzer {
             a = b.weights == weights ? b : b.reweighted(weights)
             try? JSONEncoder().encode(a).write(to: url, options: .atomic)
         }
+        // Handling depends only on the duration: bring an older shape up to date and re-suggest.
+        if a.signals.channels[.handling] != nil {
+            let h = MotionAnalysis.handling(grid: a.signals, duration: a.duration)
+            if a.signals.channels[.handling] != h {
+                a.signals[.handling] = h
+                a = a.reweighted(a.weights)
+                try? JSONEncoder().encode(a).write(to: url, options: .atomic)
+            }
+        }
         return a.weights == weights ? a : a.reweighted(weights)
     }
 

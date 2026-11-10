@@ -29,11 +29,15 @@ enum MotionAnalysis {
         return spin
     }
 
-    /// Picking up and putting down the camera: a penalty ramp over the first 1.2 s and last 1.5 s.
+    /// Picking up and putting down the camera: full penalty for the first 0.6 s and the last 2 s,
+    /// fading out by 2 s in and 4.5 s before the end. The end is the long one: collapsing the
+    /// selfie stick and reaching for the button puts a face close to the lens (which the face and
+    /// people signals love) and a hand in frame. In the reviewed footage, seconds in the last 3 s
+    /// were kept about a fifth as often as the rest, and suggestions peaking there were kept 5 of 42.
     static func handling(grid: TimeSignals, duration: Double) -> [Float] {
         (0..<grid.count).map { i in
             let t = grid.time(i)
-            return max(clamp01(Float(1 - t / 1.2)), clamp01(Float(1 - (duration - t) / 1.5)))
+            return max(clamp01(Float((2.0 - t) / 1.4)), clamp01(Float((4.5 - (duration - t)) / 2.5)))
         }
     }
 

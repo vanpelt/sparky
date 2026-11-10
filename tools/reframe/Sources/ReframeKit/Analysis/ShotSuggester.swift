@@ -81,7 +81,12 @@ public struct ShotSuggester: Sendable {
         let n = tf.count, rate = g.rate
         guard n > Int(minLength * rate) else { return [] }
         let D = inputs.heading.map { $0.fused(weights) }
-        let dmax: [Float] = (0..<n).map { t in D.map { d in d[(t * B)..<((t + 1) * B)].max() ?? 0 } ?? 0 }
+        // While you're picking the camera up or putting it away, no direction is worth filming: a
+        // face close to the lens as you collapse the stick would otherwise outrank the time penalty.
+        let handling = weights[.handling] < 0 ? g.channels[.handling] : nil
+        let dmax: [Float] = (0..<n).map { t in
+            (D.map { d in d[(t * B)..<((t + 1) * B)].max() ?? 0 } ?? 0) * (1 - (handling?[t] ?? 0))
+        }
         let c = zip(tf, dmax).map { $0 + $1 }
         let contributions = g.contributions(weights)
         let maxCount = min(8, max(1, Int(duration / 12)))
