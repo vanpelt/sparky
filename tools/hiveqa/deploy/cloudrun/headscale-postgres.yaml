@@ -1,0 +1,57 @@
+# Headscale configuration for Cloud Run with Cloud SQL (Postgres).
+#
+# Environment variables to set in Cloud Run:
+#   HEADSCALE_SERVER_URL  - public URL (e.g., https://headscale-customer.run.app)
+#   HEADSCALE_DB_HOST     - Cloud SQL connection (e.g., /cloudsql/project:region:instance)
+#   HEADSCALE_DB_NAME     - database name (e.g., headscale)
+#   HEADSCALE_DB_USER     - database user
+#   HEADSCALE_DB_PASS     - database password (use Secret Manager)
+
+server_url: "https://headscale.example.com"  # overridden by HEADSCALE_SERVER_URL
+listen_addr: "0.0.0.0:8080"
+metrics_listen_addr: "0.0.0.0:9090"
+
+grpc_listen_addr: "0.0.0.0:50443"
+grpc_allow_insecure: true
+
+noise:
+  private_key_path: /tmp/headscale/noise_private.key
+
+prefixes:
+  v4: "100.64.0.0/10"
+  v6: "fd7a:115c:a1e0::/48"
+  allocation: sequential
+
+# Postgres for stateless container compatibility.
+database:
+  type: postgres
+  postgres:
+    host: "${HEADSCALE_DB_HOST:-localhost}"
+    port: 5432
+    name: "${HEADSCALE_DB_NAME:-headscale}"
+    user: "${HEADSCALE_DB_USER:-headscale}"
+    pass: "${HEADSCALE_DB_PASS:-}"
+    ssl: true
+    max_open_conns: 10
+    max_idle_conns: 5
+    conn_max_idle_time_secs: 300
+
+# DERP — Cloud Run can't do UDP, so disable embedded DERP.
+# Rely on Tailscale's public DERP relays (or deploy your own).
+derp:
+  server:
+    enabled: false
+  urls:
+    - "https://controlplane.tailscale.com/derpmap/default"
+  auto_update_enabled: true
+  update_frequency: 24h
+
+dns:
+  magic_dns: true
+  base_domain: "hiveqa.internal"
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+
+ephemeral_node_inactivity_timeout: 5m
